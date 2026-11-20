@@ -9,10 +9,49 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/Figueredo-D/PBL_REDES/internal/crypto"
 	"github.com/Figueredo-D/PBL_REDES/internal/domain"
 	"github.com/Figueredo-D/PBL_REDES/internal/protocol"
 )
+
+type testKeyring struct {
+	mu      sync.Mutex
+	wallets map[string]*crypto.Wallet
+	nonces  map[string]uint64
+}
+
+func newTestKeyring() *testKeyring {
+	return &testKeyring{
+		wallets: make(map[string]*crypto.Wallet),
+		nonces:  make(map[string]uint64),
+	}
+}
+
+func (k *testKeyring) get(t *testing.T, alias string) *crypto.Wallet {
+	t.Helper()
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if w, ok := k.wallets[alias]; ok {
+		return w
+	}
+	w, err := crypto.GenerateWallet(alias, crypto.RolePassenger)
+	if err != nil {
+		t.Fatalf("falha ao gerar carteira de teste para %s: %v", alias, err)
+	}
+	k.wallets[alias] = w
+	return w
+}
+
+func (k *testKeyring) nextNonce(alias string) uint64 {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.nonces[alias]++
+	return k.nonces[alias]
+}
+
+var defaultTestKeyring = newTestKeyring()
 
 type memoryRoundTripper struct {
 	mu       sync.RWMutex
@@ -47,11 +86,23 @@ func sendDirectRequest(t *testing.T, srv *Server, action, token string, payload 
 		dataStr = string(b)
 	}
 
-	return srv.route(protocol.Request{
+	w := defaultTestKeyring.get(t, token)
+	req := protocol.Request{
 		Action: action,
-		Token:  token,
+		Token:  w.PublicKey,
 		Data:   dataStr,
-	})
+	}
+
+	if RequiresSignature(action) {
+		req.SenderPubKey = w.PublicKey
+		req.Nonce = defaultTestKeyring.nextNonce(token)
+		req.Timestamp = time.Now().Unix()
+		if err := protocol.SignRequest(&req, w.PrivateKey); err != nil {
+			t.Fatalf("falha ao assinar requisição de teste: %v", err)
+		}
+	}
+
+	return srv.route(req)
 }
 
 func TestCancelRidePropagatesAndReleasesSeatsAcrossServers(t *testing.T) {

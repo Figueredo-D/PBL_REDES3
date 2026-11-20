@@ -1,5 +1,11 @@
 package protocol
 
+import (
+	"fmt"
+
+	"github.com/Figueredo-D/PBL_REDES/internal/crypto"
+)
+
 const (
 	ActionAuthenticate    = "AUTHENTICATE"
 	ActionOfferRide       = "OFFER_RIDE"
@@ -9,6 +15,18 @@ const (
 	ActionBookItinerary   = "BOOK_ITINERARY"
 	ActionCancelBooking   = "CANCEL_BOOKING"
 	ActionListBookings    = "LIST_BOOKINGS"
+
+	// Ações de economia de tokens, ciclo de viagem, reputação e auditoria (Problema 3 - Blockchain)
+	ActionMintCredits      = "MINT_CREDITS"      // Privilegiada: apenas nós validadores (empresas)
+	ActionBurnCredits      = "BURN_CREDITS"      // Resgate de créditos pelo motorista
+	ActionGetBalance       = "GET_BALANCE"       // Consulta de saldo (leitura)
+	ActionCompleteTrip     = "COMPLETE_TRIP"     // Conclusão de viagem e split atômico do escrow
+	ActionReportNoShow     = "REPORT_NO_SHOW"    // Registro de ausência no embarque
+	ActionSubmitReputation = "SUBMIT_REPUTATION" // Avaliação ou denúncia pós-viagem
+	ActionGetReputation    = "GET_REPUTATION"    // Consulta de reputação (leitura)
+	ActionAuditItinerary   = "AUDIT_ITINERARY"   // Auditoria de itinerário (leitura)
+	ActionAuditAccount     = "AUDIT_ACCOUNT"     // Auditoria de saldo/extrato (leitura)
+	ActionAuditUser        = "AUDIT_USER"        // Auditoria de histórico de usuário (leitura)
 
 	// Ações do protocolo Two-Phase Commit (2PC) entre os nós do consórcio
 	Action2PCPrepare = "2PC_PREPARE"
@@ -27,9 +45,63 @@ const (
 )
 
 type Request struct {
-	Action string `json:"action"`
-	Token  string `json:"token,omitempty"`
-	Data   string `json:"data,omitempty"`
+	Action       string `json:"action"`
+	Token        string `json:"token,omitempty"`
+	Data         string `json:"data,omitempty"`
+	SenderPubKey string `json:"sender_pub_key,omitempty"` // Chave pública Ed25519 (hex) de quem originou a operação
+	Nonce        uint64 `json:"nonce,omitempty"`          // Contador sequencial por SenderPubKey (anti-replay)
+	Timestamp    int64  `json:"timestamp,omitempty"`      // Timestamp Unix (segundos) gerado na origem
+	Signature    string `json:"signature,omitempty"`      // Assinatura Ed25519 (hex) sobre o payload canônico da Request
+}
+
+// canonicalRequestEnvelope define exatamente os campos cobertos pela assinatura digital de uma Request.
+type canonicalRequestEnvelope struct {
+	Action       string `json:"action"`
+	Data         string `json:"data"`
+	Nonce        uint64 `json:"nonce"`
+	SenderPubKey string `json:"sender_pub_key"`
+	Timestamp    int64  `json:"timestamp"`
+	Token        string `json:"token"`
+}
+
+// SigningPayload gera os bytes determinísticos que devem ser assinados e verificados para a Request.
+// Cobre todos os campos relevantes da operação, incluindo Nonce e Timestamp.
+func SigningPayload(req Request) ([]byte, error) {
+	env := canonicalRequestEnvelope{
+		Action:       req.Action,
+		Data:         req.Data,
+		Nonce:        req.Nonce,
+		SenderPubKey: req.SenderPubKey,
+		Timestamp:    req.Timestamp,
+		Token:        req.Token,
+	}
+	return crypto.CanonicalSerialize(env)
+}
+
+// SignRequest assina a requisição com a chave privada Ed25519 (hex) e preenche req.Signature.
+func SignRequest(req *Request, privKeyHex string) error {
+	if req == nil {
+		return fmt.Errorf("requisição nula")
+	}
+	payload, err := SigningPayload(*req)
+	if err != nil {
+		return err
+	}
+	sig, err := crypto.SignPayload(privKeyHex, payload)
+	if err != nil {
+		return err
+	}
+	req.Signature = sig
+	return nil
+}
+
+// VerifyRequestSignature verifica a assinatura Ed25519 da Request contra req.SenderPubKey.
+func VerifyRequestSignature(req Request) error {
+	payload, err := SigningPayload(req)
+	if err != nil {
+		return err
+	}
+	return crypto.VerifySignature(req.SenderPubKey, payload, req.Signature)
 }
 
 type Response struct {
@@ -117,4 +189,40 @@ type Booking struct {
 	Itinerary      ItineraryOption `json:"itinerary"`
 	Date           string          `json:"date"`
 	Status         string          `json:"status"` // "CONFIRMED", "CANCELLED", "CANCELLED_BY_DRIVER"
+}
+
+// MintCreditsData representa o payload de recarga de créditos (TX_MINT) assinada pela empresa.
+type MintCreditsData struct {
+	TargetPubKey string `json:"target_pub_key"`
+	AmountCents  int64  `json:"amount_cents"`
+	CompanyID    string `json:"company_id"`
+	ReferenceID  string `json:"reference_id"`
+}
+
+// BurnCreditsData representa o payload de resgate de créditos (TX_BURN) assinado pelo motorista.
+type BurnCreditsData struct {
+	AmountCents int64  `json:"amount_cents"`
+	CompanyID   string `json:"company_id"`
+}
+
+// CompleteTripData representa o payload de conclusão de viagem (TX_COMPLETE_TRIP).
+type CompleteTripData struct {
+	BookingID string `json:"booking_id"`
+}
+
+// ReportNoShowData representa o payload de registro de ausência no embarque (TX_NO_SHOW).
+type ReportNoShowData struct {
+	BookingID    string `json:"booking_id"`
+	AbsentRole   string `json:"absent_role"`    // "PASSENGER" ou "DRIVER"
+	AbsentPubKey string `json:"absent_pub_key"` // Chave pública de quem faltou
+	Reason       string `json:"reason,omitempty"`
+}
+
+// SubmitReputationData representa o payload de avaliação ou denúncia (TX_REPUTATION).
+type SubmitReputationData struct {
+	BookingID    string `json:"booking_id"`
+	TargetPubKey string `json:"target_pub_key"`
+	Category     string `json:"category"` // "RATING" ou "COMPLAINT"
+	Score        int    `json:"score"`    // 1..5 para RATING; 0 para COMPLAINT
+	Comment      string `json:"comment"`
 }

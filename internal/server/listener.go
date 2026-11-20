@@ -15,6 +15,7 @@ import (
 
 	"github.com/Figueredo-D/PBL_REDES/internal/cluster"
 	"github.com/Figueredo-D/PBL_REDES/internal/concurrency"
+	"github.com/Figueredo-D/PBL_REDES/internal/crypto"
 	"github.com/Figueredo-D/PBL_REDES/internal/domain"
 	"github.com/Figueredo-D/PBL_REDES/internal/protocol"
 )
@@ -33,6 +34,8 @@ type Server struct {
 	reqManager     *concurrency.RequestManager
 	clusterManager *cluster.ClusterManager
 	txLog          *domain.TxLog
+	validator      *RequestValidator
+	wallet         *crypto.Wallet
 	dataPath       string
 	mu             sync.Mutex
 	active         bool
@@ -57,6 +60,17 @@ func NewServer(address string, serverID string, peers map[string]string, dataPat
 		return nil, err
 	}
 
+	walletPath := filepath.Join(filepath.Dir(dataPath), "validator_wallet.json")
+	wallet, err := crypto.LoadOrCreateWallet(walletPath, serverID, crypto.RoleValidator)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao inicializar carteira do validador %s: %w", serverID, err)
+	}
+
+	validator := NewRequestValidator()
+	if err := validator.RegisterValidator(serverID, wallet.PublicKey); err != nil {
+		return nil, err
+	}
+
 	clock := concurrency.NewLogicalClock(serverID)
 	return &Server{
 		address:        address,
@@ -66,7 +80,24 @@ func NewServer(address string, serverID string, peers map[string]string, dataPat
 		reqManager:     concurrency.NewRequestManager(clock),
 		clusterManager: cluster.NewClusterManager(serverID, peers),
 		txLog:          txLog,
+		validator:      validator,
+		wallet:         wallet,
 	}, nil
+}
+
+// RegisterValidator autoriza a chave pública de uma empresa parceira do consórcio.
+func (s *Server) RegisterValidator(validatorID, pubKeyHex string) error {
+	return s.validator.RegisterValidator(validatorID, pubKeyHex)
+}
+
+// ValidatorWallet retorna a carteira criptográfica Ed25519 deste nó validador.
+func (s *Server) ValidatorWallet() *crypto.Wallet {
+	return s.wallet
+}
+
+// Validator retorna o interceptor de validação criptográfica de entrada do servidor.
+func (s *Server) Validator() *RequestValidator {
+	return s.validator
 }
 
 // saveState grava o estado atual do nó em disco.
@@ -150,8 +181,21 @@ func (s *Server) handleConnection(conn net.Conn) {
 	}
 }
 
-// route encaminha operações que fazem chamadas de rede para fora do Single Worker.
+// route valida a assinatura/nonce na entrada e encaminha operações para os handlers ou Single Worker.
 func (s *Server) route(req protocol.Request) protocol.Response {
+	if authErr := s.validator.ValidateAndAccept(req); authErr != nil {
+		return protocol.Response{
+			Status:  "ERROR",
+			Code:    authErr.Code,
+			Message: authErr.Message,
+		}
+	}
+
+	// Normaliza o identificador do usuário para sua chave pública nas operações autenticadas.
+	if req.Token == "" && req.SenderPubKey != "" {
+		req.Token = req.SenderPubKey
+	}
+
 	switch req.Action {
 	case protocol.ActionSearchItinerary:
 		return s.handleSearch(req)
