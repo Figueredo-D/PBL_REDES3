@@ -15,6 +15,7 @@ import (
 
 	"github.com/Figueredo-D/PBL_REDES/internal/cluster"
 	"github.com/Figueredo-D/PBL_REDES/internal/concurrency"
+	"github.com/Figueredo-D/PBL_REDES/internal/consensus"
 	"github.com/Figueredo-D/PBL_REDES/internal/crypto"
 	"github.com/Figueredo-D/PBL_REDES/internal/domain"
 	"github.com/Figueredo-D/PBL_REDES/internal/protocol"
@@ -36,6 +37,7 @@ type Server struct {
 	txLog          *domain.TxLog
 	validator      *RequestValidator
 	wallet         *crypto.Wallet
+	pbft           *consensus.PBFTNode
 	dataPath       string
 	mu             sync.Mutex
 	active         bool
@@ -98,6 +100,16 @@ func (s *Server) ValidatorWallet() *crypto.Wallet {
 // Validator retorna o interceptor de validação criptográfica de entrada do servidor.
 func (s *Server) Validator() *RequestValidator {
 	return s.validator
+}
+
+// SetPBFTNode acopla o nó de consenso PBFT/blockchain ao servidor.
+func (s *Server) SetPBFTNode(node *consensus.PBFTNode) {
+	s.pbft = node
+}
+
+// PBFTNode retorna o nó PBFT acoplado a este servidor (ou nil se não inicializado).
+func (s *Server) PBFTNode() *consensus.PBFTNode {
+	return s.pbft
 }
 
 // saveState grava o estado atual do nó em disco.

@@ -14,7 +14,8 @@ const recoveryInterval = 5 * time.Second
 // decisionUnknown é devolvido quando o coordenador não conhece a transação.
 const decisionUnknown = "UNKNOWN"
 
-// StartRecovery inicia a recuperação do 2PC e das devoluções de vagas pendentes.
+// StartRecovery inicia a recuperação do 2PC, das devoluções de vagas pendentes
+// e da sincronização/auto-cura da blockchain.
 // Deve ser chamada antes de Start(), que bloqueia a execução.
 func (s *Server) StartRecovery() {
 	go func() {
@@ -22,6 +23,7 @@ func (s *Server) StartRecovery() {
 		s.recoverPending()
 		s.recoverPendingRideCancels()
 		s.recoverPendingReleases()
+		s.syncBlockchain()
 
 		ticker := time.NewTicker(recoveryInterval)
 		defer ticker.Stop()
@@ -30,8 +32,25 @@ func (s *Server) StartRecovery() {
 			s.recoverPending()
 			s.recoverPendingRideCancels()
 			s.recoverPendingReleases()
+			s.syncBlockchain()
 		}
 	}()
+}
+
+// syncBlockchain verifica a integridade local da blockchain e ressincroniza com a supermaioria em caso de divergência ou adulteração.
+func (s *Server) syncBlockchain() {
+	if s.pbft == nil {
+		return
+	}
+	healed, err := s.pbft.SyncAndHeal()
+	if err != nil {
+		fmt.Printf("[RECOVERY %s] Aviso na sincronização da blockchain: %v\n", s.id, err)
+		return
+	}
+	if healed {
+		fmt.Printf("[RECOVERY %s] Blockchain ressincronizada/recuperada com sucesso (altura atual: %d).\n",
+			s.id, s.pbft.Chain().Height())
+	}
 }
 
 // resolveOwnInterrupted trata as transações que este nó coordenava sem decisão gravada.

@@ -55,6 +55,9 @@ func (s *Server) internalHTTPHandler() http.Handler {
 	mux.HandleFunc("/internal/release", s.handleInternalRelease)
 	mux.HandleFunc("/internal/notify-cancel-ride", s.handleInternalNotifyCancelRide)
 	mux.HandleFunc("/internal/transactions/decision", s.handleInternalDecision)
+	if s.pbft != nil {
+		s.pbft.RegisterHTTPHandlers(mux)
+	}
 	return mux
 }
 
