@@ -228,6 +228,8 @@ func (s *Server) route(req protocol.Request) protocol.Response {
 		return s.handleCancelBooking(req)
 	case protocol.ActionCancelRide:
 		return s.handleCancelRide(req)
+	case protocol.ActionRequestDeposit:
+		return s.handleRequestDeposit(req)
 	case protocol.ActionMintCredits:
 		return s.handleMintCredits(req)
 	case protocol.ActionBurnCredits:
@@ -332,7 +334,14 @@ func (s *Server) handleBook(req protocol.Request) protocol.Response {
 	}
 
 	var presetBookingID string
-	if s.pbft != nil && escrowTx != nil {
+	if s.pbft != nil {
+		if escrowTx == nil {
+			return protocol.Response{
+				Status:  "ERROR",
+				Code:    "ESCROW_REQUIRED",
+				Message: "Reserva rejeitada: com a blockchain ativa, é obrigatório enviar signed_tx (TX_RESERVE_ESCROW).",
+			}
+		}
 		if escrowTx.Type != blockchain.TxReserveEscrow {
 			return protocol.Response{Status: "ERROR", Code: "TX_TYPE_MISMATCH", Message: "Transação de reserva deve ser do tipo RESERVE_ESCROW."}
 		}
@@ -424,7 +433,34 @@ func (s *Server) handleBook(req protocol.Request) protocol.Response {
 	var abortReason = "Transação abortada: falha ao garantir vagas."
 	var escrowBlock *blockchain.Block
 
-	// 3. Se todos os assentos foram preparados e há transação de escrow, submete ao consenso PBFT antes do 2PC Commit.
+	// Verifica se a transação local não foi preemptada por Lamport antes de submeter ao PBFT.
+	if successPrepare && s.txLog.IsAborted(transactionID) {
+		successPrepare = false
+		abortReason = "Transação abortada: preemptada por transação de maior prioridade (Lamport)."
+	}
+
+	// 3. Efetiva o commit local das vagas antes de gravar o escrow (ou aborta se foi preemptada).
+	var localCommitted bool
+	if successPrepare {
+		var commitErr error
+		if err := s.reqManager.Submit(func() error {
+			commitErr = s.txLog.Commit(transactionID)
+			if commitErr == nil {
+				s.saveState()
+			}
+			return nil
+		}); err != nil {
+			commitErr = err
+		}
+		if commitErr != nil {
+			successPrepare = false
+			abortReason = fmt.Sprintf("Transação abortada: %v", commitErr)
+		} else {
+			localCommitted = true
+		}
+	}
+
+	// 4. Se todos os assentos foram garantidos e há transação de escrow, submete ao consenso PBFT.
 	if successPrepare && s.pbft != nil && escrowTx != nil {
 		blk, err := s.pbft.SubmitTransaction(*escrowTx)
 		if err != nil {
@@ -439,6 +475,14 @@ func (s *Server) handleBook(req protocol.Request) protocol.Response {
 		s.recordDecision(transactionID, domain.DecisionAbort)
 
 		if err := s.reqManager.Submit(func() error {
+			if localCommitted {
+				// Se o commit local já tinha removido de pending mas o PBFT falhou, devolve os trechos locais.
+				for _, r := range refs {
+					if _, isLocal := s.repo.GetRide(r.RideID); isLocal {
+						_ = s.repo.ReleaseLocalSegment(r.RideID, r.From, r.To)
+					}
+				}
+			}
 			s.txLog.Abort(s.repo, transactionID)
 			s.saveState()
 			return nil
@@ -463,7 +507,6 @@ func (s *Server) handleBook(req protocol.Request) protocol.Response {
 
 	var bookingID string
 	if err := s.reqManager.Submit(func() error {
-		s.txLog.Commit(transactionID)
 		if presetBookingID != "" {
 			bookingID = s.repo.SaveBookingWithID(presetBookingID, req.Token, itin, "CONFIRMED")
 		} else {
@@ -498,7 +541,14 @@ func (s *Server) handleCancelBooking(req protocol.Request) protocol.Response {
 		return protocol.Response{Status: "ERROR", Code: "INVALID_DATA", Message: "Payload de cancelamento inválido."}
 	}
 
-	if s.pbft != nil && data.SignedTx != "" {
+	if s.pbft != nil {
+		if data.SignedTx == "" {
+			return protocol.Response{
+				Status:  "ERROR",
+				Code:    "CANCEL_TX_REQUIRED",
+				Message: "Cancelamento rejeitado: com a blockchain ativa, é obrigatório enviar signed_tx (TX_CANCEL_TRIP) para aplicação das regras pela rede.",
+			}
+		}
 		tx, errResp := parseAndVerifySignedTx(data.SignedTx, blockchain.TxCancelTrip, req.SenderPubKey)
 		if errResp != nil {
 			return *errResp

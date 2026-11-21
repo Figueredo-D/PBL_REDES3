@@ -598,14 +598,9 @@ func handleBalanceAndMint(client *Client, scanner *bufio.Scanner, wallet *crypto
 		return
 	}
 
-	// Simula a confirmacao do deposito bancario assinada pela chave da empresa conectada (validador autorizado)
-	seed := strings.TrimSpace(os.Getenv("CONSORTIUM_SEED"))
-	if seed == "" {
-		seed = "VAIJUNTO_CONSORTIUM_PBFT_2026"
-	}
-	companyWallet := crypto.GenerateDeterministicWallet(nodeLabel, crypto.RoleValidator, seed+":"+nodeLabel)
-
-	mintResp, err := client.Send(protocol.ActionMintCredits, companyWallet, true, protocol.MintCreditsData{
+	// Envia pedido assinado com a carteira do próprio passageiro;
+	// o servidor da empresa (detentor da chave validadora) valida o depósito e assina a TX_MINT no PBFT.
+	mintResp, err := client.Send(protocol.ActionRequestDeposit, wallet, true, protocol.MintCreditsData{
 		TargetPubKey: wallet.PublicKey,
 		AmountCents:  int64(math.Round(val * 100)),
 		CompanyID:    nodeLabel,

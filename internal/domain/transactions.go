@@ -360,6 +360,13 @@ func (t *TxLog) ResolveInterruptedCoordinations(repo *RideRepository) []string {
 	return resolvidas
 }
 
+// IsAborted informa se a transação já foi abortada (ex.: preemptada por Lamport).
+func (t *TxLog) IsAborted(txID string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.aborted[txID]
+}
+
 // Commit efetiva a transação: as vagas continuam reservadas e o registro de pendência é removido.
 // Retorna erro caso a transação já tenha sido abortada anteriormente (por exemplo, preemptada por Lamport).
 func (t *TxLog) Commit(txID string) error {

@@ -62,6 +62,68 @@ func parseAndVerifySignedTx(rawJSON string, expectedType blockchain.TxType, send
 	return tx, nil
 }
 
+// handleRequestDeposit recebe uma solicitação de recarga assinada pelo próprio passageiro.
+// O servidor da empresa (que detém a chave privada validadora s.wallet, nunca exposta ao cliente)
+// valida o depósito e assina a TX_MINT submetendo-a ao consenso PBFT.
+func (s *Server) handleRequestDeposit(req protocol.Request) protocol.Response {
+	if errResp := s.requirePBFT(); errResp != nil {
+		return *errResp
+	}
+	if s.wallet == nil {
+		return protocol.Response{Status: "ERROR", Code: "VALIDATOR_UNAVAILABLE", Message: "Carteira validadora da empresa não inicializada."}
+	}
+
+	var p protocol.MintCreditsData
+	if err := json.Unmarshal([]byte(req.Data), &p); err != nil {
+		return protocol.Response{Status: "ERROR", Code: "INVALID_DATA", Message: "Payload de depósito inválido."}
+	}
+	if p.AmountCents <= 0 {
+		return protocol.Response{Status: "ERROR", Code: "INVALID_DATA", Message: "amount_cents deve ser maior que zero."}
+	}
+
+	target := req.SenderPubKey
+	if p.TargetPubKey != "" && p.TargetPubKey != req.SenderPubKey {
+		return protocol.Response{Status: "ERROR", Code: "IMPERSONATION_DETECTED", Message: "Passageiro só pode solicitar depósito para a própria carteira."}
+	}
+
+	nextNonce := s.pbft.Chain().NonceOf(s.wallet.PublicKey) + 1
+	ts := req.Timestamp
+	if ts <= 0 {
+		ts = time.Now().Unix()
+	}
+	ref := p.ReferenceID
+	if ref == "" {
+		ref = fmt.Sprintf("DEP_%s_%d", s.id, ts)
+	}
+
+	tx, err := blockchain.NewSignedTransaction(s.wallet, blockchain.TxMint, nextNonce, ts, blockchain.MintPayload{
+		TargetPubKey: target,
+		AmountCents:  p.AmountCents,
+		CompanyID:    s.id,
+		ReferenceID:  ref,
+	})
+	if err != nil {
+		return protocol.Response{Status: "ERROR", Code: "SIGN_FAILED", Message: err.Error()}
+	}
+
+	blk, err := s.pbft.SubmitTransaction(tx)
+	if err != nil {
+		return protocol.Response{Status: "ERROR", Code: "CONSENSUS_REJECTED", Message: err.Error()}
+	}
+
+	out, _ := json.Marshal(map[string]any{
+		"tx_id":        tx.ID,
+		"block_height": blk.Height,
+		"block_hash":   blk.Hash,
+		"new_balance":  s.pbft.Chain().BalanceOf(target),
+	})
+	return protocol.Response{
+		Status:  "SUCCESS",
+		Message: fmt.Sprintf("Depósito aprovado pela empresa %s e creditado no bloco #%d.", s.id, blk.Height),
+		Data:    string(out),
+	}
+}
+
 // handleMintCredits processa recarga de créditos (TX_MINT) assinada por um nó validador autorizado.
 // Aceita tanto uma blockchain.Transaction pronta quanto protocol.MintCreditsData (assinada com s.wallet).
 func (s *Server) handleMintCredits(req protocol.Request) protocol.Response {

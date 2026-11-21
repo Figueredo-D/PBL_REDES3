@@ -17,6 +17,7 @@ const (
 	ActionListBookings    = "LIST_BOOKINGS"
 
 	// Ações de economia de tokens, ciclo de viagem, reputação e auditoria (Problema 3 - Blockchain)
+	ActionRequestDeposit   = "REQUEST_DEPOSIT"   // Pedido de recarga assinado pelo passageiro; servidor da empresa assina TX_MINT
 	ActionMintCredits      = "MINT_CREDITS"      // Privilegiada: apenas nós validadores (empresas)
 	ActionBurnCredits      = "BURN_CREDITS"      // Resgate de créditos pelo motorista
 	ActionGetBalance       = "GET_BALANCE"       // Consulta de saldo (leitura)

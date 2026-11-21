@@ -236,8 +236,20 @@ go run cmd/auditor/main.go \
 
 ## 9. Scripts de Teste e Demonstração da Arguição
 
-### Demonstração Automatizada dos 7 Cenários da Arguição (`cmd/blockchain-demo`)
-Sobe 4 servidores reais em portas dedicadas (`18080..18083` / `19080..19083`) e valida ao vivo todos os requisitos do problema — incluindo **gasto duplo bloqueado**, **queda de `SERVER_D`**, **adulteração manual de `blockchain.json` com rejeição e auto-cura automática** e **auditoria de conservação de valor**:
+### Simulador Geral Completo da Apresentação (`cmd/simulator`)
+Executa uma bateria completa de testes cobrindo **todos os requisitos, ataques de segurança, regras de negócio, carga concorrente, queda de nó, adulteração manual e auditoria independente**:
+```bash
+# Modo standalone (sobe os 4 servidores automaticamente em portas dedicadas e testa tudo, incluindo queda + adulteração)
+go run cmd/simulator/main.go
+
+# Modo contra servidores já rodando (localmente ou em 4 PCs do laboratório)
+go run cmd/simulator/main.go -standalone=false \
+  -servers "192.168.1.10:8080,192.168.1.11:8081,192.168.1.12:8082,192.168.1.13:8083" \
+  -http "http://192.168.1.10:9080,http://192.168.1.11:9081,http://192.168.1.12:9082,http://192.168.1.13:9083" \
+  -workers 12 -seats 4
+```
+
+### Demonstração Enxuta dos 7 Cenários (`cmd/blockchain-demo`)
 ```bash
 go run cmd/blockchain-demo/main.go
 ```
@@ -264,9 +276,8 @@ PBL_REDES3/
 │   ├── driver-client/      # Portal CLI do Motorista com carteira Ed25519
 │   ├── passenger-client/   # Portal CLI do Passageiro com carteira Ed25519
 │   ├── auditor/            # Auditor independente da blockchain
-│   ├── blockchain-demo/    # Script automatizado dos 7 cenários da arguição
-│   ├── fault-test/         # Teste de injeção de falhas no 2PC
-│   └── simulator/          # Simulador de carga
+│   ├── blockchain-demo/    # Demonstração enxuta dos 7 cenários da arguição
+│   └── simulator/          # Simulador geral completo (segurança, regras, carga concorrente, falha e adulteração)
 ├── internal/
 │   ├── crypto/             # Carteiras Ed25519, SHA-256 e serialização canônica
 │   ├── blockchain/         # Regras determinísticas, structs, máquina de estados e cadeia

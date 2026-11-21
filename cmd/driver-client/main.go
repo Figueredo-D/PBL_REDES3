@@ -267,10 +267,13 @@ func printMenuItem(key, keyColor, label string) {
 }
 
 func printMainMenu(name string, wallet *crypto.Wallet, nodeLabel, serverAddr string) {
+	statusLine := fmt.Sprintf("Motorista: [%s] (%s) | Empresa: [%s]", name, shortKey(wallet.PublicKey), nodeLabel)
 	fmt.Println()
 	fmt.Printf("%s+==============================================================================+%s\n", colorCyan, colorReset)
+	fmt.Printf("%s|%s  %s%s%s  %s|%s\n", colorCyan, colorReset, colorBold+colorWhite, padRight("PAINEL DO MOTORISTA", 74), colorReset, colorCyan, colorReset)
 	fmt.Printf("%s|%s  %s%s%s  %s|%s\n", colorCyan, colorReset, colorDim, padRight(statusLine, 74), colorReset, colorCyan, colorReset)
 	fmt.Printf("%s+------------------------------------------------------------------------------+%s\n", colorCyan, colorReset)
+	printMenuItem("1", colorBold+colorGreen, "Ofertar Nova Carona")
 	printMenuItem("2", colorBold+colorCyan, "Minhas Caronas Cadastradas")
 	printMenuItem("3", colorBold+colorYellow, "Cancelar uma Carona")
 	printMenuItem("4", colorBold+colorGreen, "Consultar Saldo & Extrato (Blockchain)")

@@ -16,7 +16,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /app/bin/server ./cmd/server/main.go &&
     CGO_ENABLED=0 GOOS=linux go build -o /app/bin/driver-client ./cmd/driver-client/main.go && \
     CGO_ENABLED=0 GOOS=linux go build -o /app/bin/passenger-client ./cmd/passenger-client/main.go && \
     CGO_ENABLED=0 GOOS=linux go build -o /app/bin/auditor ./cmd/auditor/main.go && \
-    CGO_ENABLED=0 GOOS=linux go build -o /app/bin/blockchain-demo ./cmd/blockchain-demo/main.go
+    CGO_ENABLED=0 GOOS=linux go build -o /app/bin/blockchain-demo ./cmd/blockchain-demo/main.go && \
+    CGO_ENABLED=0 GOOS=linux go build -o /app/bin/simulator ./cmd/simulator/main.go
 
 # ==========================================
 # ETAPA 2: Imagem do Servidor Validador

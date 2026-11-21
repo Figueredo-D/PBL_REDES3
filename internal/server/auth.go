@@ -79,6 +79,7 @@ func RequiresSignature(action string) bool {
 		protocol.ActionBookItinerary,
 		protocol.ActionCancelBooking,
 		protocol.ActionCancelRide,
+		protocol.ActionRequestDeposit,
 		protocol.ActionMintCredits,
 		protocol.ActionBurnCredits,
 		protocol.ActionCompleteTrip,
