@@ -1,649 +1,286 @@
-# VaiJunto — Consórcio de Caronas Compartilhadas
+# VaiJunto com Blockchain — Consórcio Descentralizado de Caronas
 
-> **Disciplina:** TEC502 — Problema 2  
-> **Linguagem:** Go 1.22 (stdlib apenas)  
+> **Disciplina:** TEC502 — Problema 3 (VAIJUNTO com Blockchain)  
+> **Linguagem:** Go 1.22 (`stdlib` exclusivamente — zero dependências externas no `go.mod`)  
+> **Consenso:** PBFT Simplificado ($N = 4$ validadores, $f = 1$, quórum $\ge 3/4$) + Two-Phase Commit (2PC) com Precedência de Lamport
 
-Sistema distribuído de reservas de caronas onde **três empresas independentes** cooperam para oferecer itinerários combinados. Cada empresa mantém seu próprio servidor, e a reserva de um itinerário que cruza várias empresas é feita de forma **atômica** usando Two-Phase Commit (2PC) com precedência de Lamport para resolução de conflitos e recuperação automática após falhas.
+Sistema distribuído de caronas compartilhadas entre **quatro empresas independentes** (`SERVER_A`, `SERVER_B`, `SERVER_C` e `SERVER_D`), onde o registro financeiro (tokens, escrow, pagamentos atômicos, cancelamentos) e a reputação dos usuários são mantidos em uma **blockchain permissionada de consórcio**, transparente, auditável e resistente a adulteração — sem servidor central nem banco de dados compartilhado.
 
 ---
 
 ## Sumário
 
-1. [Visão Geral da Arquitetura](#visão-geral-da-arquitetura)
-2. [Pré-requisitos](#pré-requisitos)
-3. [Opção A — Rodando Localmente (Go direto)](#opção-a--rodando-localmente-go-direto)
-4. [Opção B — Rodando com Docker Compose (mesma máquina)](#opção-b--rodando-com-docker-compose-mesma-máquina)
-5. [Opção C — Rodando em Máquinas Distintas do Laboratório](#opção-c--rodando-em-máquinas-distintas)
-6. [Usando o Cliente Motorista](#usando-o-cliente-motorista)
-7. [Usando o Cliente Passageiro](#usando-o-cliente-passageiro)
-8. [Simulador de Carga](#simulador-de-carga)
-9. [Teste Automatizado com Injeção de Falhas](#teste-automatizado-com-injeção-de-falhas)
-10. [Testes Unitários](#testes-unitários)
-11. [Estrutura do Projeto](#estrutura-do-projeto)
-12. [Mecanismos Técnicos](#mecanismos-técnicos)
+1. [Arquitetura do Consórcio](#1-arquitetura-do-consórcio)
+2. [Conceitos e Garantias de Segurança](#2-conceitos-e-garantias-de-segurança)
+3. [Regras de Negócio Determinísticas](#3-regras-de-negócio-determinísticas)
+4. [Pré-requisitos](#4-pré-requisitos)
+5. [Execução Local (Go direto)](#5-execução-local-go-direto)
+6. [Execução com Docker Compose (4 contêineres isolados)](#6-execução-com-docker-compose-4-contêineres-isolados)
+7. [Execução em 4 Máquinas Distintas do Laboratório](#7-execução-em-4-máquinas-distintas-do-laboratório)
+8. [Usando os Clientes Interativos e o Auditor](#8-usando-os-clientes-interativos-e-o-auditor)
+9. [Scripts de Teste e Demonstração da Arguição](#9-scripts-de-teste-e-demonstração-da-arguição)
+10. [Estrutura do Projeto](#10-estrutura-do-projeto)
 
 ---
 
-## Visão Geral da Arquitetura
+## 1. Arquitetura do Consórcio
 
-```
-                    CONSÓRCIO VAIJUNTO
-  ┌─────────────────────────────────────────────────────────┐
-  │                                                         │
-  │  [Motorista A] ──TCP──► [SERVER_A :8080]                │
-  │  [Passageiro A]──TCP──►  API Interna:9080               │
-  │                                                         │
-  │                                                         │
-  │  [Motorista B] ──TCP──► [SERVER_B :8081]                │
-  │  [Passageiro B]──TCP──►  API Interna:9081               │
-  │                                                         │
-  │  [Motorista C] ──TCP──► [SERVER_C :8082]                │
-  │  [Passageiro C]──TCP──►  API Interna:9082               │
-  └─────────────────────────────────────────────────────────┘
+```text
+                      CONSÓRCIO VAIJUNTO (PBFT N=4, Quórum 3/4)
+  ┌────────────────────────────────────────────────────────────────────────┐
+  │  [Motorista / Passageiro] ──TCP (Ed25519)──► [SERVER_A :8080 | :9080] │
+  │  [Motorista / Passageiro] ──TCP (Ed25519)──► [SERVER_B :8081 | :9081] │
+  │  [Motorista / Passageiro] ──TCP (Ed25519)──► [SERVER_C :8082 | :9082] │
+  │  [Motorista / Passageiro] ──TCP (Ed25519)──► [SERVER_D :8083 | :9083] │
+  │                                                                        │
+  │  Comunicação Inter-Nós (HTTP interno :9080..:9083):                    │
+  │   • /internal/*  → Busca BFS, 2PC (Prepare/Commit/Abort) e Recovery    │
+  │   • /p2p/*       → Consenso PBFT (tx, propose, vote, status, chain)    │
+  └────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Clientes → Servidor:** TCP persistente com protocolo JSON por linha (`\n`)
-- **Servidor → Servidor:** HTTP REST (API interna sob `/internal/`)
-- **Cada servidor** mantém seus próprios dados em disco (`data/SERVER_X/`)
-- **Nenhum servidor central** — cada nó pode coordenar reservas para seus passageiros
-
-### Portas Padrão
-
-| Servidor  | TCP (Clientes) | REST Interna (Consórcio) |
-|-----------|---------------|--------------------------|
-| SERVER_A  | 8080          | 9080                     |
-| SERVER_B  | 8081          | 9081                     |
-| SERVER_C  | 8082          | 9082                     |
+| Nó Validador | Porta TCP (Clientes) | Porta HTTP Interna (`/internal/*` e `/p2p/*`) | Persistência Local |
+|--------------|----------------------|-----------------------------------------------|--------------------|
+| `SERVER_A`   | `8080`               | `9080`                                        | `data/SERVER_A/`   |
+| `SERVER_B`   | `8081`               | `9081`                                        | `data/SERVER_B/`   |
+| `SERVER_C`   | `8082`               | `9082`                                        | `data/SERVER_C/`   |
+| `SERVER_D`   | `8083`               | `9083`                                        | `data/SERVER_D/`   |
 
 ---
 
-## Pré-requisitos
+## 2. Conceitos e Garantias de Segurança
 
-### Para rodar localmente (Opção A)
+Esta seção explicita os fundamentos técnicos que sustentam a segurança e a auditabilidade do sistema (substituindo o relatório técnico):
 
-- **Go 1.22+** instalado → [golang.org/dl](https://golang.org/dl/)
-- Verificar: `go version`
+### 2.1. Identidade Criptográfica e Não-Repúdio (`crypto/ed25519`)
+* Cada usuário (passageiro ou motorista) e cada empresa validadora possui um par de chaves assimétricas **Ed25519** (`internal/crypto/keys.go`).
+* A chave pública (`PublicKey` em hex) é a identidade global do usuário no consórcio, **independente da empresa** em que ele se conectou.
+* Toda operação que altera saldo, reserva/escrow ou reputação exige assinatura digital Ed25519 sobre a **serialização JSON canônica** (`CanonicalSerialize`, com chaves ordenadas recursivamente), cobrindo `action`, `data`, `sender_pub_key`, `nonce` e `timestamp`.
+* O interceptor `RequestValidator` (`internal/server/auth.go`) valida todas as assinaturas na entrada do servidor, bloqueando imediatamente requisições sem assinatura (`MISSING_SIGNATURE`), adulteradas por um único byte (`INVALID_SIGNATURE`), tentativas de operar em nome de terceiros (`IMPERSONATION_DETECTED`) e ataques de repetição (`REPLAY_ATTACK`).
 
-### Para rodar com Docker (Opções B e C)
+### 2.2. Impossibilidade de Gasto Duplo e Conservação Exata de Valor
+* Todas as contas nascem com **saldo `0`** e todos os valores são representados em **centavos (`int64`)** para eliminar erros de ponto flutuante (`float64`).
+* A emissão de créditos (`TX_MINT`) só é aceita quando assinada pela chave privada de um dos **4 nós validadores autorizados**; o resgate (`TX_BURN`) exige assinatura e saldo do titular.
+* Cada conta possui um **`Nonce` estritamente sequencial** validado on-chain (`tx.Nonce == state.Nonces[from] + 1`). Mesmo que um passageiro dispare duas reservas simultâneas em empresas diferentes, apenas uma transação com o próximo nonce válido (e saldo suficiente) pode ser incluída no bloco pelo consenso PBFT.
+* A cada transação aplicada, a máquina de estados verifica a invariante matemática de conservação de valor:
+  $$\sum \text{MINT} - \sum \text{BURN} = \sum_{u} \text{Balances}[u] + \sum_{e \in \text{LOCKED}} e.\text{TotalCents}$$
 
-- **Docker Desktop** (Windows/Mac) ou **Docker Engine** (Linux)
-- **Docker Compose** v2+ (já incluído no Docker Desktop)
-- Verificar: `docker --version` e `docker compose version`
+### 2.3. Atomicidade Integrada: 2PC de Assentos + Escrow na Blockchain
+Para manter a reserva de assentos atômica sem travar créditos nem vender assentos duas vezes, `handleBook` (`internal/server/listener.go`) executa:
+1. **Pré-validação no Ledger:** verifica assinatura, nonce e saldo livre antes de tocar qualquer assento.
+2. **Fase 1 do 2PC (`PREPARE` com Precedência de Lamport):** trava os assentos em todas as empresas do itinerário. Se qualquer trecho falhar, aborta o 2PC sem debitar créditos.
+3. **Consenso PBFT (`TX_RESERVE_ESCROW`):** submete o bloqueio de créditos à rede. Se falhar (ex.: gasto duplo simultâneo), o coordenador aborta o 2PC e devolve todos os assentos preparados.
+4. **Fase 2 do 2PC (`COMMIT`):** somente após o bloco do escrow atingir quórum ($\ge 3/4$), grava `DecisionCommit` em `txlog.json` e efetiva os assentos (com recuperação automática via `recovery.go`).
+
+### 2.4. Por que $N = 4$ Validadores no PBFT? (Tolerância a Falhas e Adulteração)
+Pelo teorema de consenso tolerante a falhas bizantinas (Lamport–Shostak–Pease), para tolerar $f$ nós que podem cair **ou** agir de forma maliciosa/adulterada, a rede exige:
+$$N \ge 3f + 1 \implies \text{para } f = 1,\; N = 4 \text{ nós e quórum } Q = 2f + 1 = 3 \text{ votos } (\ge \tfrac{2}{3})$$
+* **Queda de 1 nó:** os 3 nós restantes ainda formam quórum (`3/4`) e continuam finalizando blocos normalmente (com rotação automática de líder `leader = (height + view) % 4`). Quando o nó retorna, sincroniza automaticamente.
+* **Adulteração manual de `blockchain.json`:** cada bloco encadeia o `PrevHash` SHA-256 do bloco anterior, o `TxRootHash` das transações e um certificado com **$\ge 3$ votos `COMMIT` assinados** por validadores distintos (`CommitVotes`).
+  1. Se um nó editar seu arquivo local (ex.: aumentar saldo ou apagar avaliação negativa), o hash do bloco quebra.
+  2. Mesmo que o atacante recalcule todos os hashes localmente, **ele não possui as chaves privadas dos outros 2 validadores** para forjar os 3 `CommitVotes` exigidos.
+  3. Os 3 nós honestos rejeitam automaticamente qualquer proposta adulterada (HTTP 409) e a rotina `SyncAndHeal` (`internal/consensus/sync.go`, disparada periodicamente pelo `recovery.go`) detecta a corrupção em disco, baixa a cadeia canônica da supermaioria, valida todos os blocos desde o gênese, substitui `blockchain.json` atomicamente e reconstrói o `LedgerState`.
+
+### 2.5. Reputação Imutável (*Append-Only*) e Auditoria Independente
+* Avaliações (`RATING` 1–5), denúncias (`COMPLAINT`), cancelamentos tardios (`LATE_CANCEL`), cancelamentos de motorista (`DRIVER_CANCEL`) e ausências (`NO_SHOW_PASSENGER` / `NO_SHOW_DRIVER`) são gravados permanentemente vinculados à **chave pública do usuário** — nunca à empresa. Se um motorista migrar de empresa, todo o histórico o acompanha e aparece automaticamente na busca de itinerários (`SEARCH_ITINERARY`).
+* A máquina de estados bloqueia edição/exclusão, exige participação real no `booking_id` (impedindo avaliações falsas de quem não viajou) e impede avaliação duplicada.
+* Qualquer participante pode auditar o histórico completo de um itinerário, conta ou usuário via `cmd/auditor` ou nos menus dos clientes, verificando hashes, assinaturas e conservação de valor diretamente nos blocos, sem depender de nenhuma empresa específica.
 
 ---
 
-## Opção A — Rodando Localmente (Go direto)
+## 3. Regras de Negócio Determinísticas
 
-Ideal para desenvolvimento e debug. Todos os servidores rodam na mesma máquina.
+Todas as regras utilizam exclusivamente o `TimestampUnix` assinado dentro da transação (nunca `time.Now()` local na validação):
 
-### 1. Clonar e entrar no repositório
+* **Conclusão de Viagem (`TX_COMPLETE_TRIP`):** transfere o valor em escrow para todos os motoristas de cada trecho em **uma única operação atômica** (split payment tudo-ou-nada).
+* **Cancelamento pelo Passageiro (`TX_CANCEL_TRIP`):**
+  * Antecedência $\ge 2$ horas (`7200s`): devolução de **100%** ao passageiro.
+  * Cancelamento tardio ($< 2$ horas): retenção de **30%** distribuída proporcionalmente aos motoristas + devolução de **70%** ao passageiro + registro automático de `LATE_CANCEL`.
+* **Cancelamento pelo Motorista (`TX_CANCEL_TRIP`):** devolução de **100%** ao passageiro + registro automático de `DRIVER_CANCEL`.
+* **Ausência no Embarque (`TX_NO_SHOW`):**
+  * Passageiro ausente: **100%** repassado aos motoristas + registro `NO_SHOW_PASSENGER`.
+  * Motorista ausente: **100%** devolvido ao passageiro + registro grave `NO_SHOW_DRIVER`.
+
+---
+
+## 4. Pré-requisitos
+
+* **Go 1.22+** (para execução local e testes): `go version`
+* **Docker + Docker Compose v2+** (para execução em contêineres isolados): `docker compose version`
+
+---
+
+## 5. Execução Local (Go direto)
+
+Abra 4 terminais na raiz do repositório e suba os 4 nós validadores:
 
 ```bash
-git clone <url-do-repositorio>
-cd PBL_REDES2
-```
-
-### 2. Subir os 3 servidores (cada um em um terminal separado)
-
-**Terminal 1 — SERVER_A:**
-```bash
+# Terminal 1
 go run cmd/server/main.go SERVER_A
-```
 
-**Terminal 2 — SERVER_B:**
-```bash
+# Terminal 2
 go run cmd/server/main.go SERVER_B
-```
 
-**Terminal 3 — SERVER_C:**
-```bash
+# Terminal 3
 go run cmd/server/main.go SERVER_C
+
+# Terminal 4
+go run cmd/server/main.go SERVER_D
 ```
 
-Você verá uma saída assim em cada terminal:
-```
-================================================================
-        INICIANDO SERVIDOR DO CONSÓRCIO - [SERVER_A]
-================================================================
-  • Porta TCP Clientes:     :8080
-  • API REST Interna:       :9080
-  • Arquivo de Estado:      data/SERVER_A/estado.json
-  • Parceiros do Consórcio configurados:
-      - SERVER_B -> http://localhost:9081
-      - SERVER_C -> http://localhost:9082
-----------------------------------------------------------------
-```
-
-> **Nota:** Os três servidores se conectam automaticamente entre si pelos defaults. Não é necessário passar flags extras para rodar tudo na mesma máquina.
-
-### 3. Verificar que os servidores estão prontos
-
+Verifique o status PBFT dos 4 nós:
 ```bash
-curl http://localhost:9080/internal/rides
-curl http://localhost:9081/internal/rides
-curl http://localhost:9082/internal/rides
+curl http://localhost:9080/p2p/status
+curl http://localhost:9081/p2p/status
+curl http://localhost:9082/p2p/status
+curl http://localhost:9083/p2p/status
 ```
-
-Cada um deve retornar `[]` (lista vazia) se ainda não há caronas, ou a lista de caronas existentes.
 
 ---
 
-## Opção B — Rodando com Docker Compose (mesma máquina)
-
-Simula o ambiente de laboratório com containers isolados rodando na mesma máquina.
-
-### 1. Construir e subir todos os containers (Servidores + Clientes)
+## 6. Execução com Docker Compose (4 contêineres isolados)
 
 ```bash
+# Compila e sobe os 4 validadores (server_a..server_d) + clientes
 docker compose up --build -d
-```
 
-Isso vai:
-- Compilar os binários em Go (`server`, `driver-client` e `passenger-client`) dentro de um container builder multi-stage
-- Subir os **3 containers de servidores**: `server_a`, `server_b`, `server_c`
-- Subir os **2 containers de clientes interativos**: `driver_client` (motorista) e `passenger_client` (passageiro)
-- Conectá-los na rede interna `consorcio-net` (com resolução automática de DNS para `server_a:8080`, `server_b:8081` e `server_c:8082`)
-- Expor as portas dos servidores para o host (`8080-8082` TCP, `9080-9082` REST)
-
-### 2. Acessar os clientes interativos em container Docker
-
-Com a infraestrutura no ar, você pode abrir quantos terminais quiser para interagir com os containers de **Motorista** e **Passageiro**:
-
-**Abrir um terminal interativo do Cliente Motorista (via Docker):**
-```bash
+# Abrir cliente Motorista interativo
 docker compose run --rm driver_client
-```
-*(Ou, para usar o container `driver_client` já em execução: `docker exec -it driver_client ./driver-client`)*
 
-**Abrir um terminal interativo do Cliente Passageiro (via Docker):**
-```bash
+# Abrir cliente Passageiro interativo
 docker compose run --rm passenger_client
-```
-*(Ou, para usar o container `passenger_client` já em execução: `docker exec -it passenger_client ./passenger-client`)*
 
-Para ver os logs dos servidores:
-```bash
-docker compose logs -f server_a server_b server_c
-```
+# Simular queda de 1 nó (rede continua operando com quórum 3/4)
+docker compose stop server_d
 
-### 3. Parar os containers
+# Religar o nó (sincroniza automaticamente via SyncAndHeal)
+docker compose start server_d
 
-```bash
+# Encerrar tudo
 docker compose down
 ```
 
-### 4. Testar a queda de um servidor (simulação de falha)
+---
+
+## 7. Execução em 4 Máquinas Distintas do Laboratório
+
+Suponha 4 PCs no laboratório (LARSID/LADICA) com IPs `192.168.1.10` (`SERVER_A`), `.11` (`SERVER_B`), `.12` (`SERVER_C`) e `.13` (`SERVER_D`). Em cada máquina, construa a imagem e rode seu contêiner isolado:
 
 ```bash
-# Derruba o server_b
-docker compose stop server_b
-
-# Verifica que A e C continuam respondendo
-curl http://localhost:9080/internal/rides
-curl http://localhost:9082/internal/rides
-
-# Reinicia server_b (recovery automático ao subir)
-docker compose start server_b
+docker build --target server -t vaijunto-server .
 ```
 
-> **Dados persistidos:** Os dados de cada servidor ficam em `./data/SERVER_A/`, `./data/SERVER_B/` e `./data/SERVER_C/`. Para começar do zero, apague esses diretórios antes de subir.
+**Máquina 1 (`SERVER_A`):**
+```bash
+docker run -d --name server_a -p 8080:8080 -p 9080:9080 \
+  -e SERVER_ID=SERVER_A -e CLIENT_PORT=8080 -e INTERNAL_PORT=9080 \
+  -e PEERS="SERVER_B=http://192.168.1.11:9081,SERVER_C=http://192.168.1.12:9082,SERVER_D=http://192.168.1.13:9083" \
+  -v "$(pwd)/data/SERVER_A:/app/data/SERVER_A" vaijunto-server
+```
+
+**Máquina 2 (`SERVER_B`):**
+```bash
+docker run -d --name server_b -p 8081:8081 -p 9081:9081 \
+  -e SERVER_ID=SERVER_B -e CLIENT_PORT=8081 -e INTERNAL_PORT=9081 \
+  -e PEERS="SERVER_A=http://192.168.1.10:9080,SERVER_C=http://192.168.1.12:9082,SERVER_D=http://192.168.1.13:9083" \
+  -v "$(pwd)/data/SERVER_B:/app/data/SERVER_B" vaijunto-server
+```
+
+**Máquina 3 (`SERVER_C`):**
+```bash
+docker run -d --name server_c -p 8082:8082 -p 9082:9082 \
+  -e SERVER_ID=SERVER_C -e CLIENT_PORT=8082 -e INTERNAL_PORT=9082 \
+  -e PEERS="SERVER_A=http://192.168.1.10:9080,SERVER_B=http://192.168.1.11:9081,SERVER_D=http://192.168.1.13:9083" \
+  -v "$(pwd)/data/SERVER_C:/app/data/SERVER_C" vaijunto-server
+```
+
+**Máquina 4 (`SERVER_D`):**
+```bash
+docker run -d --name server_d -p 8083:8083 -p 9083:9083 \
+  -e SERVER_ID=SERVER_D -e CLIENT_PORT=8083 -e INTERNAL_PORT=9083 \
+  -e PEERS="SERVER_A=http://192.168.1.10:9080,SERVER_B=http://192.168.1.11:9081,SERVER_C=http://192.168.1.12:9082" \
+  -v "$(pwd)/data/SERVER_D:/app/data/SERVER_D" vaijunto-server
+```
+
+*(As chaves públicas dos 4 validadores são derivadas deterministicamente via `CONSORTIUM_SEED`, eliminando cópia manual de arquivos entre as máquinas. Lembre-se de liberar as portas 8080–8083 e 9080–9083 no firewall.)*
 
 ---
 
-## Opção C — Rodando em Máquinas Distintas
+## 8. Usando os Clientes Interativos e o Auditor
 
-### Pré-requisito: descobrir os IPs das máquinas
-
-Em cada máquina, rode:
+### Cliente Motorista (`cmd/driver-client`)
 ```bash
-# Linux/Mac
-hostname -I
-
-# Windows (PowerShell)
-ipconfig
-```
-
-Exemplo hipotético:
-- **Máquina 1** (SERVER_A): `192.168.1.10`
-- **Máquina 2** (SERVER_B): `192.168.1.11`
-- **Máquina 3** (SERVER_C): `192.168.1.12`
-
-### Opção C.1 — Go direto em cada máquina
-
-**Máquina 1 (SERVER_A):**
-```bash
-go run cmd/server/main.go -id SERVER_A -port 8080 -internal-port 9080 \
-  -peers "SERVER_B=http://192.168.1.11:9081,SERVER_C=http://192.168.1.12:9082"
-```
-
-**Máquina 2 (SERVER_B):**
-```bash
-go run cmd/server/main.go -id SERVER_B -port 8081 -internal-port 9081 \
-  -peers "SERVER_A=http://192.168.1.10:9080,SERVER_C=http://192.168.1.12:9082"
-```
-
-**Máquina 3 (SERVER_C):**
-```bash
-go run cmd/server/main.go -id SERVER_C -port 8082 -internal-port 9082 \
-  -peers "SERVER_A=http://192.168.1.10:9080,SERVER_B=http://192.168.1.11:9081"
-```
-
-### Opção C.2 — Docker em cada máquina
-
-Em cada máquina, copie o repositório e crie um arquivo `.env` no diretório do projeto. Depois rode apenas o container daquela empresa:
-
-**Máquina 1 (SERVER_A):**
-```bash
-docker build --target server -t vaijunto-server .
-
-docker run -d \
-  --name server_a \
-  -p 8080:8080 \
-  -p 9080:9080 \
-  -e SERVER_ID=SERVER_A \
-  -e CLIENT_PORT=8080 \
-  -e INTERNAL_PORT=9080 \
-  -e PEERS="SERVER_B=http://192.168.1.11:9081,SERVER_C=http://192.168.1.12:9082" \
-  -v "$(pwd)/data/SERVER_A:/app/data/SERVER_A" \
-  vaijunto-server
-```
-
-**Máquina 2 (SERVER_B):**
-```bash
-docker build --target server -t vaijunto-server .
-
-docker run -d \
-  --name server_b \
-  -p 8081:8081 \
-  -p 9081:9081 \
-  -e SERVER_ID=SERVER_B \
-  -e CLIENT_PORT=8081 \
-  -e INTERNAL_PORT=9081 \
-  -e PEERS="SERVER_A=http://192.168.1.10:9080,SERVER_C=http://192.168.1.12:9082" \
-  -v "$(pwd)/data/SERVER_B:/app/data/SERVER_B" \
-  vaijunto-server
-```
-
-**Máquina 3 (SERVER_C):**
-```bash
-docker build --target server -t vaijunto-server .
-
-docker run -d \
-  --name server_c \
-  -p 8082:8082 \
-  -p 9082:9082 \
-  -e SERVER_ID=SERVER_C \
-  -e CLIENT_PORT=8082 \
-  -e INTERNAL_PORT=9082 \
-  -e PEERS="SERVER_A=http://192.168.1.10:9080,SERVER_B=http://192.168.1.11:9081" \
-  -v "$(pwd)/data/SERVER_C:/app/data/SERVER_C" \
-  vaijunto-server
-```
-
-> **Atenção com firewall:** As portas TCP (8080-8082) e REST (9080-9082) precisam estar liberadas entre as máquinas do laboratório. No Windows, pode ser necessário criar uma regra de entrada no Firewall do Windows.
-
-### Verificar conectividade entre os nós
-
-Da máquina 1, teste se ela consegue falar com as demais:
-```bash
-curl http://192.168.1.11:9081/internal/rides
-curl http://192.168.1.12:9082/internal/rides
-```
-
----
-
-## Usando o Cliente Motorista
-
-O cliente motorista se conecta ao servidor da sua empresa e pode ofertar, listar e cancelar caronas, além de alternar de servidor ou de usuário diretamente pelo menu.
-
-### Modo interativo (Docker ou Go local)
-
-```bash
-# Via Docker Compose (recomendado)
-docker compose run --rm driver_client
-
-# Ou usando o container já iniciado pelo docker compose up -d
-docker exec -it driver_client ./driver-client
-
-# Via Go local (conectando pelo seletor interativo)
 go run cmd/driver-client/main.go
-
-# Conectar diretamente a um servidor específico (local ou remoto)
-go run cmd/driver-client/main.go localhost:8080
-go run cmd/driver-client/main.go 192.168.1.10:8080
 ```
+Gera/carrega automaticamente sua carteira Ed25519 em `data/wallets/` e permite ofertar/listar/cancelar caronas, consultar saldo e extrato, resgatar créditos (`TX_BURN`), registrar ausência de passageiro (`TX_NO_SHOW`), consultar reputação portável e auditar itinerários.
 
-Ou via variável de ambiente:
+### Cliente Passageiro (`cmd/passenger-client`)
 ```bash
-SERVER_HOST=192.168.1.10:8080 go run cmd/driver-client/main.go
-```
-
-### Fluxo básico no menu
-
-```
-+==============================================================================+
-|  PAINEL DO MOTORISTA                                                         |
-|   Motorista: [driver_A]   |   Empresa: [SERVER_A (server_a:8080)]            |
-+------------------------------------------------------------------------------+
-|                                                                              |
-|    [1]  Ofertar Nova Carona                                                  |
-|    [2]  Minhas Caronas Cadastradas                                           |
-|    [3]  Cancelar uma Carona                                                  |
-|    [4]  Trocar de Servidor / Trocar Usuario                                  |
-|    [0]  Encerrar Sessao                                                      |
-|                                                                              |
-+==============================================================================+
-```
-
-1. **Ofertar Nova Carona** → informe as cidades da rota (ex: `Salvador, Feira`), data (`2026-12-15`), horário (`08:00`), total de assentos e preços por trecho.
-2. **Minhas Caronas Cadastradas** → exibe cartões detalhados de cada carona com rota completa, preços e assentos disponíveis/totais por trecho.
-3. **Cancelar uma Carona** → remove a carona ofertada (pelo ID ou pelo número `#` da lista), marca automaticamente todas as reservas associadas em qualquer servidor do consórcio como `CANCELLED_BY_DRIVER` e devolve as vagas reservadas nos demais trechos do itinerário.
-4. **Trocar de Servidor / Trocar Usuário** → permite alternar rapidamente entre `SERVER_A`, `SERVER_B`, `SERVER_C` (ou outro IP) e trocar o token do motorista sem sair do programa.
-
----
-
-## Usando o Cliente Passageiro
-
-O cliente passageiro se conecta ao servidor da sua empresa e pode buscar, reservar e cancelar itinerários — inclusive rotas combinadas que cruzam várias empresas.
-
-### Modo interativo (Docker ou Go local)
-
-```bash
-# Via Docker Compose (recomendado)
-docker compose run --rm passenger_client
-
-# Ou usando o container já iniciado pelo docker compose up -d
-docker exec -it passenger_client ./passenger-client
-
-# Via Go local (conectando pelo seletor interativo)
 go run cmd/passenger-client/main.go
-
-# Conectar diretamente a um servidor específico (local ou remoto)
-go run cmd/passenger-client/main.go localhost:8081
-go run cmd/passenger-client/main.go 192.168.1.11:8081
 ```
+Gera/carrega automaticamente sua carteira Ed25519 e permite solicitar recarga (`TX_MINT`), buscar itinerários (exibindo reputação on-chain dos motoristas), reservar com 2PC + Escrow atômico, cancelar com regras de 2h aplicadas pela rede, concluir viagem (split atômico), avaliar/denunciar motoristas, registrar ausência de motorista e auditar a blockchain.
 
-Ou via variável de ambiente:
+### Auditor Independente (`cmd/auditor`)
+Consulta diretamente os endpoints `/p2p/status` e `/p2p/chain` dos nós, valida criptograficamente todos os blocos (SHA-256 + quórum $\ge 3/4$ + conservação de valor) sem depender de nenhuma empresa:
 ```bash
-SERVER_HOST=192.168.1.11:8081 go run cmd/passenger-client/main.go
-```
+# Auditoria geral dos 4 nós locais
+go run cmd/auditor/main.go
 
-### Fluxo básico no menu
-
-```
-+==============================================================================+
-|  PAINEL DO PASSAGEIRO                                                        |
-|   Passageiro: [Maria]   |   Empresa: [SERVER_A (server_a:8080)]              |
-+------------------------------------------------------------------------------+
-|                                                                              |
-|    [1]  Consultar e Reservar Itinerarios (Busca BFS / Reserva 2PC)           |
-|    [2]  Minhas Reservas Efetuadas                                            |
-|    [3]  Cancelar uma Reserva                                                 |
-|    [4]  Trocar de Servidor / Trocar Usuario                                  |
-|    [0]  Encerrar Sessao                                                      |
-|                                                                              |
-+==============================================================================+
-```
-
-1. **Consultar e Reservar Itinerários** → informe origem, destino e data. O servidor consulta todos os parceiros do consórcio via BFS, exibe as opções diretas e combinadas em tabelas detalhadas e coordena a reserva atômica via **Two-Phase Commit (2PC)**.
-2. **Minhas Reservas Efetuadas** → lista todas as reservas do passageiro com seus trechos, empresas responsáveis e status atualizado (`[CONFIRMADA]`, `[CANCELADA PELO PASSAGEIRO]` ou `[CANCELADA PELO MOTORISTA]`).
-3. **Cancelar uma Reserva** → cancela uma reserva confirmada (pelo ID ou pelo número `#` da lista) e devolve automaticamente os assentos a todas as empresas envolvidas no itinerário.
-4. **Trocar de Servidor / Trocar Usuário** → permite alternar rapidamente entre os servidores do consórcio e trocar o token do passageiro.
-
-### Exemplo de uso completo
-
-```
-Origem: Salvador
-Destino: Montes Claros
-Data: 2025-12-01
-
-Itinerários encontrados:
-  [1] Salvador → Feira (SERVER_A) + Feira → Conquista (SERVER_B) + Conquista → Montes Claros (SERVER_C)
-      Preço total: R$ 120,00 | Saída: 08:00
-
-Escolha o itinerário [1]: 1
-→ Reservando via 2PC entre SERVER_A, SERVER_B e SERVER_C...
-✔ RESERVA CONFIRMADA! Código: SERVER_A_BOOKING_0001
+# Auditar itinerário, conta ou reputação específica (local ou em IPs remotos)
+go run cmd/auditor/main.go \
+  -nodes "http://192.168.1.10:9080,http://192.168.1.11:9081,http://192.168.1.12:9082,http://192.168.1.13:9083" \
+  -booking SERVER_C_BOOK_001
 ```
 
 ---
 
-## Simulador de Carga
+## 9. Scripts de Teste e Demonstração da Arguição
 
-Gera um grande volume de buscas e reservas simultâneas de forma autônoma, sem interface gráfica. Ideal para estressar o sistema e verificar que nenhum assento é confirmado duas vezes.
-
-### Rodando com servidores já no ar (modo padrão)
-
+### Demonstração Automatizada dos 7 Cenários da Arguição (`cmd/blockchain-demo`)
+Sobe 4 servidores reais em portas dedicadas (`18080..18083` / `19080..19083`) e valida ao vivo todos os requisitos do problema — incluindo **gasto duplo bloqueado**, **queda de `SERVER_D`**, **adulteração manual de `blockchain.json` com rejeição e auto-cura automática** e **auditoria de conservação de valor**:
 ```bash
-# Os servidores devem estar rodando (Opção A, B ou C)
-go run cmd/simulator/main.go
+go run cmd/blockchain-demo/main.go
 ```
 
-### Parâmetros disponíveis
-
+### Suíte Completa de Testes Unitários e de Integração
 ```bash
-go run cmd/simulator/main.go \
-  -passengers 30 \       # número de passageiros concorrentes (padrão: 20)
-  -rounds 5 \            # rodadas de busca+reserva por passageiro (padrão: 5)
-  -seats 15 \            # assentos por trecho (gera disputa acirrada, padrão: 12)
-  -setup true \          # publica caronas de teste automaticamente (padrão: true)
-  -timeout 10s \         # timeout por requisição (padrão: 10s)
-  -servers "localhost:8080,localhost:8081,localhost:8082" \
-  -rest-bases "http://localhost:9080,http://localhost:9081,http://localhost:9082"
+go test -v -count=1 ./...
 ```
-
-### Rodando contra servidores remotos (laboratório)
-
-```bash
-go run cmd/simulator/main.go \
-  -passengers 50 \
-  -rounds 10 \
-  -seats 20 \
-  -servers "192.168.1.10:8080,192.168.1.11:8081,192.168.1.12:8082" \
-  -rest-bases "http://192.168.1.10:9080,http://192.168.1.11:9081,http://192.168.1.12:9082"
-```
-
-### Saída esperada
-
-```
-================================================================
-     SIMULADOR DE CARGA — VaiJunto Consórcio de Caronas
-================================================================
-[SETUP] Publicando caronas de teste em todos os servidores...
-[SIM] Iniciando 30 passageiros × 5 rodadas...
-
-================================================================
-                    RELATÓRIO FINAL
-================================================================
-  Buscas:    150 total | 147 sucesso | 3 falha
-  Reservas:  150 total | 12 commits | 138 sem vaga | 0 erros
-  Latência:  avg=142ms min=23ms max=891ms
-
-  Validação de Overbooking:
-    SERVER_A: 15 vagas → 3 consumidas ✔
-    SERVER_B: 15 vagas → 3 consumidas ✔
-    SERVER_C: 15 vagas → 3 consumidas ✔
-  ✔ ZERO OVERBOOKING CONFIRMADO!
-================================================================
-```
+Cobre:
+* `internal/crypto` — geração/persistência Ed25519, serialização canônica, assinatura válida, rejeição de 1 byte adulterado e falsificação de chave.
+* `internal/blockchain` — economia de tokens, conservação de valor, gasto duplo, escrow + split, regras de cancelamento ($\ge 2$h e $< 2$h), *no-show*, reputação *append-only* e detecção de adulteração em disco.
+* `internal/consensus` — consenso PBFT com 4 nós, operação com 1 nó offline + sync, rejeição de bloco adulterado e auto-cura automática.
+* `internal/domain` — precedência e preempção de Lamport no 2PC.
+* `internal/server` — validação anti-replay/assinatura na entrada, cancelamento multi-servidor e fluxo E2E completo nos 4 servidores.
 
 ---
 
-## Teste Automatizado com Injeção de Falhas
+## 10. Estrutura do Projeto
 
-Verifica automaticamente os 3 invariantes de segurança do sistema sob condições adversas (concorrência + queda de servidor).
-
-> **Atenção:** Este teste sobe instâncias dos servidores diretamente no processo (sem Docker). **Certifique-se de que as portas 8080-8082 e 9080-9082 estão livres** antes de rodar.
-
-```bash
-go run cmd/fault-test/main.go
-```
-
-### Com parâmetros
-
-```bash
-go run cmd/fault-test/main.go \
-  -seats 10 \      # assentos por trecho (padrão: 10)
-  -workers 15      # passageiros concorrentes (padrão: 15)
-```
-
-### O que o teste verifica
-
-O teste executa automaticamente a seguinte sequência:
-
-1. **Setup** — Sobe 3 servidores em processo, publica 1 carona em cada (Salvador→Feira→Conquista→Montes Claros)
-2. **Carga + Falha** — Dispara N reservas simultâneas do itinerário completo e **derruba o SERVER_B no meio da execução**
-3. **Liveness** — Verifica que SERVER_A continua atendendo requisições locais enquanto B está fora
-4. **Recuperação** — Reinicia SERVER_B e aguarda a thread de recovery resolver transações pendentes
-5. **Verificação dos invariantes:**
-
-| # | Invariante | Verificação |
-|---|-----------|-------------|
-| 1 | **Zero Overbooking** | Nenhum servidor tem vagas negativas |
-| 2 | **Atomicidade 2PC** | Para cada reserva confirmada, todos os trechos foram consumidos |
-| 3 | **Zero Assentos Bloqueados** | Nenhuma transação permanece em estado `PREPARED` após recovery |
-
-### Saída esperada (sucesso)
-
-```
-================================================================
-   TESTE AUTOMATIZADO SOB CARGA COM INJEÇÃO DE FALHAS (2PC)
-================================================================
-[INICIALIZAÇÃO] Subindo instâncias dos servidores A, B e C...
-[SETUP] Ofertando caronas com 10 assentos em cada empresa...
-
-[EXECUÇÃO] Disparando reservas simultâneas e INJETANDO QUEDA do Servidor B...
-  [INJEÇÃO DE FALHA] CRASH NO SERVIDOR B! Parando porta TCP e API REST interna...
-[EXECUÇÃO] Rodada sob falha concluída: 3 confirmadas, 12 falharam/recusadas.
-
-[LIVENESS] Testando se o Servidor A continua operando normalmente...
-  [OK] PASSOU: Servidor A continua atendendo requisições independentes do nó que falhou!
-
-[RECUPERAÇÃO] Reiniciando Servidor B...
-  [OK] Servidor B reiniciado. Aguardando reconciliação da thread de recovery...
-
-================================================================
-               VERIFICAÇÃO FORMAL DOS INVARIANTES
-================================================================
-1. [OK] PASSOU: Nenhum assento foi confirmado para mais de um passageiro!
-2. [OK] PASSOU: Atomicidade 2PC respeitada!
-3. [OK] PASSOU: Todas as transações pendentes foram resolvidas pelo Recovery!
-
-RESULTADO FINAL: TODOS OS INVARIANTES DO EDITAL FORAM CONFIRMADOS COM SUCESSO!
-================================================================
-```
-
----
-
-## Testes Unitários
-
-```bash
-# Rodar todos os testes
-go test ./...
-
-# Rodar apenas os testes de domínio (Lamport + 2PC) com saída detalhada
-go test -v ./internal/domain/...
-```
-
-Os testes cobrem:
-- `TestLamportPriorityOrdering` — Ordenação total por tupla (timestamp, ID do coordenador)
-- `TestLamportSeatContentionAndPreemption` — Preempção de transação de menor prioridade quando chega uma de maior prioridade disputando o mesmo assento
-
-```
-=== RUN   TestLamportPriorityOrdering
---- PASS: TestLamportPriorityOrdering (0.00s)
-=== RUN   TestLamportSeatContentionAndPreemption
-[TXLOG] Precedência de Lamport: Preemptando transação TX_1 (Lamport=10, Coord=SERVER_B)
-        em favor de (Lamport=5, Coord=SERVER_A) no trecho Salvador → Feira
---- PASS: TestLamportSeatContentionAndPreemption (0.00s)
-PASS
-```
-
----
-
-## Estrutura do Projeto
-
-```
-PBL_REDES2/
+```text
+PBL_REDES3/
 ├── cmd/
-│   ├── server/            # Binário do servidor de empresa
-│   ├── driver-client/     # Cliente interativo do motorista
-│   ├── passenger-client/  # Cliente interativo do passageiro
-│   ├── simulator/         # Simulador de carga autônomo
-│   └── fault-test/        # Teste automatizado com injeção de falhas
-│
+│   ├── server/             # Servidor validador (TCP + HTTP REST + P2P PBFT)
+│   ├── driver-client/      # Portal CLI do Motorista com carteira Ed25519
+│   ├── passenger-client/   # Portal CLI do Passageiro com carteira Ed25519
+│   ├── auditor/            # Auditor independente da blockchain
+│   ├── blockchain-demo/    # Script automatizado dos 7 cenários da arguição
+│   ├── fault-test/         # Teste de injeção de falhas no 2PC
+│   └── simulator/          # Simulador de carga
 ├── internal/
-│   ├── cluster/
-│   │   ├── rest_client.go    # Cliente HTTP para a API REST interna do consórcio
-│   │   └── node_client.go    # Abstração de nó parceiro
-│   ├── concurrency/
-│   │   └── lock_manager.go   # Relógio lógico de Lamport + fila de requisições
-│   ├── domain/
-│   │   ├── ride.go           # Modelo de carona e trechos
-│   │   ├── repository.go     # Repositório de caronas com persistência em JSON
-│   │   ├── itinerary.go      # Algoritmo BFS para descoberta de itinerários combinados
-│   │   ├── transactions.go   # Log de transações 2PC + precedência de Lamport
-│   │   ├── persistence.go    # Serialização/deserialização de estado em disco
-│   │   └── transactions_test.go
-│   ├── protocol/
-│   │   ├── messages.go       # Estruturas de mensagens TCP (Request/Response)
-│   │   └── encoder.go        # Serialização JSON + delimitador de linha
-│   └── server/
-│       ├── listener.go       # Loop TCP principal + handlers de todas as ações
-│       ├── internal_http.go  # Servidor HTTP da API REST interna (/internal/*)
-│       └── recovery.go       # Thread de recuperação pós-falha (2PC recovery)
-│
+│   ├── crypto/             # Carteiras Ed25519, SHA-256 e serialização canônica
+│   ├── blockchain/         # Regras determinísticas, structs, máquina de estados e cadeia
+│   ├── consensus/          # Motor PBFT (Propose/Prepare/Commit), P2P HTTP e SyncAndHeal
+│   ├── domain/             # Caronas, BFS de itinerários, repositório e log 2PC/Lamport
+│   ├── protocol/           # Mensagens TCP e assinatura canônica de Requests
+│   ├── cluster/            # Cliente REST interno entre empresas
+│   ├── concurrency/        # Relógio lógico de Lamport e fila de requisições
+│   └── server/             # Listener TCP, auth anti-replay, ledger handlers, HTTP interno e recovery
 ├── docs/
-│   └── api-rest-consorcio.md  # Especificação completa da API REST interna
-│
-├── data/                      # Persistência em disco (criado automaticamente)
-│   ├── SERVER_A/
-│   │   ├── estado.json        # Caronas e reservas do SERVER_A
-│   │   └── txlog.json         # Log de transações 2PC do SERVER_A
-│   ├── SERVER_B/
-│   └── SERVER_C/
-│
-├── Dockerfile                 # Multi-stage build: server, driver-client, passenger-client
-├── docker-compose.yml         # Orquestração dos 3 servidores e 2 clientes em containers isolados
-├── go.mod
+│   ├── arquitetura-blockchain.md
+│   └── api-rest-consorcio.md
+├── Dockerfile
+├── docker-compose.yml
+├── go.mod                  # Zero dependências externas (Go 1.22 stdlib)
 └── README.md
 ```
-
----
-
-## Mecanismos Técnicos
-
-### Two-Phase Commit (2PC)
-
-Cada reserva de itinerário multi-empresa segue o protocolo 2PC coordenado pelo servidor ao qual o passageiro está conectado:
-
-1. **Fase 1 (Prepare):** O coordenador envia `POST /internal/prepare` para todos os participantes. Cada um tenta reservar (bloquear) o assento localmente e responde `VOTE_COMMIT` ou `VOTE_ABORT`.
-2. **Fase 2 (Commit/Abort):** Se todos votaram `VOTE_COMMIT`, o coordenador envia `POST /internal/commit` para todos. Se qualquer um votou `VOTE_ABORT`, envia `POST /internal/abort` para todos os que já tinham preparado.
-
-### Precedência de Lamport
-
-Quando dois passageiros de servidores diferentes disputam o último assento simultaneamente:
-
-- Cada transação recebe um **timestamp lógico de Lamport** gerado pelo coordenador
-- A prioridade é determinada pela tupla **(lamport_time, coordinator_id)** — menor tupla vence
-- Se uma transação de **maior prioridade** chegar enquanto uma de **menor prioridade** está em estado `PREPARED`, a de menor prioridade é **preemptada** (assento liberado) e o participante aceita a nova
-
-### Recuperação Pós-Falha
-
-Uma **thread de recovery** roda periodicamente em segundo plano em cada servidor:
-
-- Ao reiniciar, o servidor carrega seu `txlog.json` do disco
-- Para cada transação em estado `PREPARED` sem decisão registrada, consulta o coordenador via `GET /internal/transactions/decision`
-- Se o coordenador decidiu `COMMIT` → aplica o commit localmente
-- Se o coordenador decidiu `ABORT` → desfaz o prepare e libera o assento
-- Se o coordenador não for alcançável → aguarda e tenta novamente no próximo ciclo
-- Garante que **nenhum assento fique bloqueado indefinidamente** após uma queda
-
-### Persistência
-
-Cada servidor salva seu estado em dois arquivos JSON:
-- `estado.json` — catálogo de caronas, assentos disponíveis e reservas confirmadas
-- `txlog.json` — log de transações 2PC em andamento (necessário para recovery)
-
-Toda operação que modifica o estado é salva em disco antes de responder ao cliente.
-
