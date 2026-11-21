@@ -126,7 +126,13 @@ func (n *PBFTNode) SubmitTransaction(tx blockchain.Transaction) (blockchain.Bloc
 	}
 
 	if err := n.chain.ValidateTransaction(tx); err != nil {
-		return blockchain.Block{}, fmt.Errorf("transação inválida: %w", err)
+		// Se este nó estiver ligeiramente atrasado em relação ao líder, sincroniza e tenta validar novamente
+		if healed, _ := n.SyncAndHeal(); healed {
+			err = n.chain.ValidateTransaction(tx)
+		}
+		if err != nil {
+			return blockchain.Block{}, fmt.Errorf("transação inválida: %w", err)
+		}
 	}
 
 	maxAttempts := len(n.validatorOrder)

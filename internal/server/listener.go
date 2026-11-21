@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Figueredo-D/PBL_REDES/internal/blockchain"
 	"github.com/Figueredo-D/PBL_REDES/internal/cluster"
 	"github.com/Figueredo-D/PBL_REDES/internal/concurrency"
 	"github.com/Figueredo-D/PBL_REDES/internal/consensus"
@@ -95,6 +96,16 @@ func (s *Server) RegisterValidator(validatorID, pubKeyHex string) error {
 // ValidatorWallet retorna a carteira criptográfica Ed25519 deste nó validador.
 func (s *Server) ValidatorWallet() *crypto.Wallet {
 	return s.wallet
+}
+
+// SetValidatorWallet substitui a carteira do validador (ex.: carteira determinística do consórcio)
+// e a registra automaticamente na lista de validadores autorizados.
+func (s *Server) SetValidatorWallet(w *crypto.Wallet) error {
+	if w == nil {
+		return fmt.Errorf("carteira de validador nula")
+	}
+	s.wallet = w
+	return s.validator.RegisterValidator(s.id, w.PublicKey)
 }
 
 // Validator retorna o interceptor de validação criptográfica de entrada do servidor.
@@ -217,6 +228,26 @@ func (s *Server) route(req protocol.Request) protocol.Response {
 		return s.handleCancelBooking(req)
 	case protocol.ActionCancelRide:
 		return s.handleCancelRide(req)
+	case protocol.ActionMintCredits:
+		return s.handleMintCredits(req)
+	case protocol.ActionBurnCredits:
+		return s.handleBurnCredits(req)
+	case protocol.ActionGetBalance:
+		return s.handleGetBalance(req)
+	case protocol.ActionCompleteTrip:
+		return s.handleCompleteTrip(req)
+	case protocol.ActionReportNoShow:
+		return s.handleReportNoShow(req)
+	case protocol.ActionSubmitReputation:
+		return s.handleSubmitReputation(req)
+	case protocol.ActionGetReputation:
+		return s.handleGetReputation(req)
+	case protocol.ActionAuditItinerary:
+		return s.handleAuditItinerary(req)
+	case protocol.ActionAuditAccount:
+		return s.handleAuditAccount(req)
+	case protocol.ActionAuditUser:
+		return s.handleAuditUser(req)
 	}
 
 	var resp protocol.Response
@@ -270,6 +301,7 @@ func (s *Server) handleSearch(req protocol.Request) protocol.Response {
 		Destination: data.Destination,
 		Date:        data.Date,
 	})
+	s.enrichItinerariesWithReputation(itineraries)
 
 	jsonResult, _ := json.Marshal(itineraries)
 	return protocol.Response{
@@ -279,14 +311,42 @@ func (s *Server) handleSearch(req protocol.Request) protocol.Response {
 	}
 }
 
-// handleBook executa a reserva distribuída por 2PC.
+// handleBook executa a reserva distribuída por 2PC integrada ao Escrow atômico na blockchain.
+// Ordem segura: Pré-validação de saldo/escrow -> 2PC Prepare -> PBFT TX_RESERVE_ESCROW -> 2PC Commit.
 func (s *Server) handleBook(req protocol.Request) protocol.Response {
 	var itin domain.ItineraryResult
-	if err := json.Unmarshal([]byte(req.Data), &itin); err != nil {
-		return protocol.Response{Status: "ERROR", Code: "INVALID_DATA", Message: "Payload de reserva inválido."}
+	var escrowTx *blockchain.Transaction
+
+	// Suporta tanto envelope {itinerary, signed_tx} quanto domain.ItineraryResult direto (compatibilidade).
+	var env bookWithEscrowRequest
+	if err := json.Unmarshal([]byte(req.Data), &env); err == nil && len(env.Itinerary.Segments) > 0 {
+		itin = env.Itinerary
+		escrowTx = env.SignedTx
+	} else {
+		if err := json.Unmarshal([]byte(req.Data), &itin); err != nil {
+			return protocol.Response{Status: "ERROR", Code: "INVALID_DATA", Message: "Payload de reserva inválido."}
+		}
 	}
 	if len(itin.Segments) == 0 {
 		return protocol.Response{Status: "ERROR", Code: "INVALID_DATA", Message: "Itinerário sem trechos."}
+	}
+
+	var presetBookingID string
+	if s.pbft != nil && escrowTx != nil {
+		if escrowTx.Type != blockchain.TxReserveEscrow {
+			return protocol.Response{Status: "ERROR", Code: "TX_TYPE_MISMATCH", Message: "Transação de reserva deve ser do tipo RESERVE_ESCROW."}
+		}
+		if escrowTx.FromPubKey != req.SenderPubKey {
+			return protocol.Response{Status: "ERROR", Code: "IMPERSONATION_DETECTED", Message: "Escrow assinado por chave diferente do passageiro."}
+		}
+		// 1. Pré-validação no estado local da blockchain (assinatura, nonce e saldo) ANTES de travar assentos
+		if err := s.pbft.Chain().ValidateTransaction(*escrowTx); err != nil {
+			return protocol.Response{Status: "ERROR", Code: "ESCROW_REJECTED", Message: fmt.Sprintf("Saldo insuficiente ou escrow inválido: %v", err)}
+		}
+		var ep blockchain.ReserveEscrowPayload
+		if err := json.Unmarshal(escrowTx.Payload, &ep); err == nil {
+			presetBookingID = ep.BookingID
+		}
 	}
 
 	lamportTS := s.reqManager.NextTimestamp()
@@ -361,6 +421,20 @@ func (s *Server) handleBook(req protocol.Request) protocol.Response {
 		}
 	}
 
+	var abortReason = "Transação abortada: falha ao garantir vagas."
+	var escrowBlock *blockchain.Block
+
+	// 3. Se todos os assentos foram preparados e há transação de escrow, submete ao consenso PBFT antes do 2PC Commit.
+	if successPrepare && s.pbft != nil && escrowTx != nil {
+		blk, err := s.pbft.SubmitTransaction(*escrowTx)
+		if err != nil {
+			successPrepare = false
+			abortReason = fmt.Sprintf("Transação abortada: falha no escrow da blockchain (%v).", err)
+		} else {
+			escrowBlock = &blk
+		}
+	}
+
 	if !successPrepare {
 		s.recordDecision(transactionID, domain.DecisionAbort)
 
@@ -377,7 +451,7 @@ func (s *Server) handleBook(req protocol.Request) protocol.Response {
 				fmt.Printf("[SERVER %s] Aviso: abort não confirmado em %s: %v\n", s.id, peerID, err)
 			}
 		}
-		return protocol.Response{Status: "ERROR", Code: "2PC_ABORTED", Message: "Transação abortada: falha ao garantir vagas."}
+		return protocol.Response{Status: "ERROR", Code: "2PC_ABORTED", Message: abortReason}
 	}
 
 	s.recordDecision(transactionID, domain.DecisionCommit)
@@ -390,27 +464,48 @@ func (s *Server) handleBook(req protocol.Request) protocol.Response {
 	var bookingID string
 	if err := s.reqManager.Submit(func() error {
 		s.txLog.Commit(transactionID)
-		bookingID = s.repo.SaveBooking(req.Token, itin, "CONFIRMED")
+		if presetBookingID != "" {
+			bookingID = s.repo.SaveBookingWithID(presetBookingID, req.Token, itin, "CONFIRMED")
+		} else {
+			bookingID = s.repo.SaveBooking(req.Token, itin, "CONFIRMED")
+		}
 		s.saveState()
 		return nil
 	}); err != nil {
 		return protocol.Response{Status: "ERROR", Code: "WORKER_EXECUTION_FAILED", Message: err.Error()}
 	}
 
+	respPayload := map[string]any{"booking_id": bookingID}
+	if escrowBlock != nil {
+		respPayload["block_height"] = escrowBlock.Height
+		respPayload["block_hash"] = escrowBlock.Hash
+	}
+	respData, _ := json.Marshal(respPayload)
+
 	fmt.Printf("[SERVER %s] Transação 2PC bem-sucedida! Reserva %s confirmada.\n", s.id, bookingID)
 	return protocol.Response{
 		Status:  "SUCCESS",
 		Message: fmt.Sprintf("Reserva confirmada sob o ID %s via 2PC.", bookingID),
-		Data:    fmt.Sprintf(`{"booking_id":"%s"}`, bookingID),
+		Data:    string(respData),
 	}
 }
 
-// handleCancelBooking marca a reserva como cancelada e pede a devolução das vagas
-// às empresas que possuem trechos nela. Falhas ficam registradas para nova tentativa.
+// handleCancelBooking aplica o cancelamento on-chain (quando presente), marca a reserva como cancelada
+// e pede a devolução das vagas às empresas que possuem trechos nela.
 func (s *Server) handleCancelBooking(req protocol.Request) protocol.Response {
 	var data protocol.CancelBookingData
 	if err := json.Unmarshal([]byte(req.Data), &data); err != nil {
 		return protocol.Response{Status: "ERROR", Code: "INVALID_DATA", Message: "Payload de cancelamento inválido."}
+	}
+
+	if s.pbft != nil && data.SignedTx != "" {
+		tx, errResp := parseAndVerifySignedTx(data.SignedTx, blockchain.TxCancelTrip, req.SenderPubKey)
+		if errResp != nil {
+			return *errResp
+		}
+		if _, err := s.pbft.SubmitTransaction(tx); err != nil {
+			return protocol.Response{Status: "ERROR", Code: "CONSENSUS_REJECTED", Message: fmt.Sprintf("Cancelamento rejeitado pela rede: %v", err)}
+		}
 	}
 
 	var booking domain.Booking
@@ -429,17 +524,28 @@ func (s *Server) handleCancelBooking(req protocol.Request) protocol.Response {
 
 	return protocol.Response{
 		Status:  "SUCCESS",
-		Message: "Reserva cancelada. As devoluções de vagas pendentes serão tentadas novamente.",
+		Message: "Reserva cancelada. Regras financeiras aplicadas pela rede e vagas devolvidas.",
 	}
 }
 
-// handleCancelRide remove a carona ofertada pelo motorista, cancela todas as reservas locais
-// que continham essa carona, devolve as vagas dos demais trechos dessas reservas e notifica
-// todos os outros servidores do consórcio para que façam o mesmo com as reservas dos seus passageiros.
+// handleCancelRide remove a carona ofertada pelo motorista, aplica eventuais cancelamentos on-chain,
+// cancela todas as reservas locais que continham essa carona e notifica os parceiros do consórcio.
 func (s *Server) handleCancelRide(req protocol.Request) protocol.Response {
 	var data protocol.CancelRideData
 	if err := json.Unmarshal([]byte(req.Data), &data); err != nil {
 		return protocol.Response{Status: "ERROR", Code: "INVALID_DATA", Message: "Payload inválido."}
+	}
+
+	if s.pbft != nil && len(data.CancelTxs) > 0 {
+		for _, rawTx := range data.CancelTxs {
+			tx, errResp := parseAndVerifySignedTx(rawTx, blockchain.TxCancelTrip, req.SenderPubKey)
+			if errResp != nil {
+				return *errResp
+			}
+			if _, err := s.pbft.SubmitTransaction(tx); err != nil {
+				return protocol.Response{Status: "ERROR", Code: "CONSENSUS_REJECTED", Message: fmt.Sprintf("Cancelamento on-chain rejeitado: %v", err)}
+			}
+		}
 	}
 
 	peers := make([]string, 0, len(s.clusterManager.Peers))

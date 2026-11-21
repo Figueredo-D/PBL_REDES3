@@ -120,7 +120,8 @@ type OfferRideData struct {
 }
 
 type CancelRideData struct {
-	RideID string `json:"ride_id"`
+	RideID    string   `json:"ride_id"`
+	CancelTxs []string `json:"cancel_txs,omitempty"` // Transações TX_CANCEL_TRIP assinadas em JSON (opcional)
 }
 
 // NotifyCancelRideData é o payload de POST /internal/notify-cancel-ride.
@@ -145,6 +146,7 @@ type BookItineraryData struct {
 
 type CancelBookingData struct {
 	BookingID string `json:"booking_id"`
+	SignedTx  string `json:"signed_tx,omitempty"` // JSON da blockchain.Transaction TX_CANCEL_TRIP assinada pelo passageiro
 }
 
 // ReleaseSeatsData é o payload de POST /internal/release. O nó que guarda a reserva cancelada envia

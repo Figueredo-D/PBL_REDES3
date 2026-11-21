@@ -11,7 +11,7 @@ services:
       - SERVER_ID=SERVER_A
       - CLIENT_PORT=8080
       - INTERNAL_PORT=9080
-      - PEERS=SERVER_B=http://server_b:9081,SERVER_C=http://server_c:9082
+      - PEERS=SERVER_B=http://server_b:9081,SERVER_C=http://server_c:9082,SERVER_D=http://server_d:9083
       - DATA_DIR=/app/data
     ports:
       - "8080:8080"
@@ -32,7 +32,7 @@ services:
       - SERVER_ID=SERVER_B
       - CLIENT_PORT=8081
       - INTERNAL_PORT=9081
-      - PEERS=SERVER_A=http://server_a:9080,SERVER_C=http://server_c:9082
+      - PEERS=SERVER_A=http://server_a:9080,SERVER_C=http://server_c:9082,SERVER_D=http://server_d:9083
       - DATA_DIR=/app/data
     ports:
       - "8081:8081"
@@ -53,13 +53,34 @@ services:
       - SERVER_ID=SERVER_C
       - CLIENT_PORT=8082
       - INTERNAL_PORT=9082
-      - PEERS=SERVER_A=http://server_a:9080,SERVER_B=http://server_b:9081
+      - PEERS=SERVER_A=http://server_a:9080,SERVER_B=http://server_b:9081,SERVER_D=http://server_d:9083
       - DATA_DIR=/app/data
     ports:
       - "8082:8082"
       - "9082:9082"
     volumes:
       - ./data/SERVER_C:/app/data/SERVER_C
+    networks:
+      - consorcio-net
+    restart: unless-stopped
+
+  server_d:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: server
+    container_name: server_d
+    environment:
+      - SERVER_ID=SERVER_D
+      - CLIENT_PORT=8083
+      - INTERNAL_PORT=9083
+      - PEERS=SERVER_A=http://server_a:9080,SERVER_B=http://server_b:9081,SERVER_C=http://server_c:9082
+      - DATA_DIR=/app/data
+    ports:
+      - "8083:8083"
+      - "9083:9083"
+    volumes:
+      - ./data/SERVER_D:/app/data/SERVER_D
     networks:
       - consorcio-net
     restart: unless-stopped
@@ -76,10 +97,12 @@ services:
       - SERVER_A_ADDR=server_a:8080
       - SERVER_B_ADDR=server_b:8081
       - SERVER_C_ADDR=server_c:8082
+      - SERVER_D_ADDR=server_d:8083
     depends_on:
       - server_a
       - server_b
       - server_c
+      - server_d
     networks:
       - consorcio-net
 
@@ -95,10 +118,12 @@ services:
       - SERVER_A_ADDR=server_a:8080
       - SERVER_B_ADDR=server_b:8081
       - SERVER_C_ADDR=server_c:8082
+      - SERVER_D_ADDR=server_d:8083
     depends_on:
       - server_a
       - server_b
       - server_c
+      - server_d
     networks:
       - consorcio-net
 

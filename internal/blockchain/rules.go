@@ -13,6 +13,7 @@ const (
 	GenesisTimestampUnix = int64(1700000000)
 
 	// Política de Cancelamento do Consórcio
+	// Para que a regra seja justa e determinística, o tempo de cancelamento é medido em relação ao horário de embarque do passageiro.
 	FreeCancelWindowSeconds int64 = 2 * 3600 // >= 2 horas antes do embarque: devolução de 100%
 	LateCancelRetentionPct  int64 = 30       // < 2 horas: 30% retido e distribuído aos motoristas
 	LateCancelRefundPct     int64 = 70       // < 2 horas: 70% devolvido ao passageiro

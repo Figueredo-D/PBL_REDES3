@@ -291,6 +291,38 @@ func (r *RideRepository) SaveBooking(passengerToken string, itinerary ItineraryR
 	return bookingID
 }
 
+// SaveBookingWithID salva a reserva utilizando um bookingID pré-definido (ex.: o mesmo ID do escrow na blockchain).
+func (r *RideRepository) SaveBookingWithID(bookingID, passengerToken string, itinerary ItineraryResult, status string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if bookingID == "" {
+		r.bookingCount++
+		bookingID = fmt.Sprintf("%s_BOOK_%04d", r.nodeID, r.bookingCount)
+	}
+	booking := &Booking{
+		ID:             bookingID,
+		PassengerToken: passengerToken,
+		Itinerary:      itinerary,
+		Date:           time.Now().Format("2006-01-02"),
+		Status:         status,
+	}
+	r.bookings[bookingID] = booking
+	return bookingID
+}
+
+// UpdateBookingStatus atualiza o status local de uma reserva (ex.: COMPLETED, NO_SHOW).
+func (r *RideRepository) UpdateBookingStatus(bookingID, status string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b, ok := r.bookings[bookingID]
+	if !ok {
+		return false
+	}
+	b.Status = status
+	return true
+}
+
 // ListBookingsByPassenger recupera o histórico de bilhetes comprados por um passageiro.
 func (r *RideRepository) ListBookingsByPassenger(passengerToken string) []*Booking {
 	r.mu.RLock()

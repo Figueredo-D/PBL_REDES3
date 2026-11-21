@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Figueredo-D/PBL_REDES/internal/blockchain"
+	"github.com/Figueredo-D/PBL_REDES/internal/consensus"
+	"github.com/Figueredo-D/PBL_REDES/internal/crypto"
 	"github.com/Figueredo-D/PBL_REDES/internal/server"
 )
 
@@ -74,23 +77,26 @@ func main() {
 
 	serverID = strings.ToUpper(serverID)
 
-	// Portas padrão locais por nó
+	// Portas padrão locais por nó (N = 4 validadores para consenso PBFT 3f+1)
 	defaultTCPPorts := map[string]string{
 		"SERVER_A": ":8080",
 		"SERVER_B": ":8081",
 		"SERVER_C": ":8082",
+		"SERVER_D": ":8083",
 	}
 
 	defaultInternalPorts := map[string]string{
 		"SERVER_A": ":9080",
 		"SERVER_B": ":9081",
 		"SERVER_C": ":9082",
+		"SERVER_D": ":9083",
 	}
 
 	defaultPeerBases := map[string]string{
 		"SERVER_A": "http://localhost:9080",
 		"SERVER_B": "http://localhost:9081",
 		"SERVER_C": "http://localhost:9082",
+		"SERVER_D": "http://localhost:9083",
 	}
 
 	// 2. Porta TCP do Cliente (Precedência: Flag -> ENV CLIENT_PORT / TCP_PORT / PORT -> Default)
@@ -154,7 +160,7 @@ func main() {
 	}
 
 	// Checa variáveis de ambiente individuais (ex: PEER_B_URL, SERVER_B_URL, etc.)
-	allKnownNodes := []string{"SERVER_A", "SERVER_B", "SERVER_C"}
+	allKnownNodes := []string{"SERVER_A", "SERVER_B", "SERVER_C", "SERVER_D"}
 	for _, node := range allKnownNodes {
 		if node == serverID {
 			continue
@@ -183,13 +189,35 @@ func main() {
 		dataDir = "data"
 	}
 	dataPath := filepath.Join(dataDir, serverID, "estado.json")
+	chainPath := filepath.Join(dataDir, serverID, "blockchain.json")
+
+	// 6. Inicializa chaves determinísticas dos 4 validadores do consórcio (PBFT N=4)
+	consortiumSeed := strings.TrimSpace(os.Getenv("CONSORTIUM_SEED"))
+	if consortiumSeed == "" {
+		consortiumSeed = "VAIJUNTO_CONSORTIUM_PBFT_2026"
+	}
+	validatorsPubMap := make(map[string]string, len(allKnownNodes)) // pubKeyHex -> validatorID
+	var localWallet *crypto.Wallet
+	for _, nodeID := range allKnownNodes {
+		w := crypto.GenerateDeterministicWallet(nodeID, crypto.RoleValidator, consortiumSeed+":"+nodeID)
+		validatorsPubMap[w.PublicKey] = nodeID
+		if nodeID == serverID {
+			localWallet = w
+		}
+	}
+	if localWallet == nil {
+		localWallet = crypto.GenerateDeterministicWallet(serverID, crypto.RoleValidator, consortiumSeed+":"+serverID)
+		validatorsPubMap[localWallet.PublicKey] = serverID
+	}
 
 	fmt.Println("================================================================")
 	fmt.Printf("        INICIANDO SERVIDOR DO CONSÓRCIO - [%s]\n", serverID)
 	fmt.Println("================================================================")
 	fmt.Printf("  • Porta TCP Clientes:     %s\n", port)
-	fmt.Printf("  • API REST Interna:       %s\n", internalPort)
+	fmt.Printf("  • API REST / P2P Interna: %s\n", internalPort)
 	fmt.Printf("  • Arquivo de Estado:      %s\n", dataPath)
+	fmt.Printf("  • Arquivo Blockchain:     %s\n", chainPath)
+	fmt.Printf("  • Chave Pública Nó:       %s\n", localWallet.PublicKey)
 	fmt.Println("  • Parceiros do Consórcio configurados:")
 	for peerID, addr := range peers {
 		fmt.Printf("      - %s -> %s\n", peerID, addr)
@@ -200,6 +228,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("[FATAL] Erro ao carregar o estado de %s: %v", serverID, err)
 	}
+	if err := srv.SetValidatorWallet(localWallet); err != nil {
+		log.Fatalf("[FATAL] Erro ao configurar carteira validadora de %s: %v", serverID, err)
+	}
+	for pubHex, valID := range validatorsPubMap {
+		if err := srv.RegisterValidator(valID, pubHex); err != nil {
+			log.Fatalf("[FATAL] Erro ao registrar validador %s: %v", valID, err)
+		}
+	}
+
+	bc, err := blockchain.LoadOrCreateBlockchain(chainPath, validatorsPubMap)
+	if err != nil {
+		fmt.Printf("[SERVER %s] Aviso ao carregar blockchain local (%v). Auto-cura será executada via SyncAndHeal.\n", serverID, err)
+	}
+	pbftNode := consensus.NewPBFTNode(serverID, localWallet, bc, validatorsPubMap, peers)
+	srv.SetPBFTNode(pbftNode)
 
 	// Sobe a API REST interna antes do listener TCP, que bloqueia a execução
 	if err := srv.StartInternalHTTP(internalPort); err != nil {

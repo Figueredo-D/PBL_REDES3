@@ -50,6 +50,21 @@ func GenerateWallet(id, role string) (*Wallet, error) {
 	}, nil
 }
 
+// GenerateDeterministicWallet deriva um par de chaves Ed25519 determinístico a partir de uma seed.
+// Utilizado para que os 4 nós validadores do consórcio conheçam mutuamente suas chaves públicas
+// em ambientes multi-máquina sem necessidade de distribuição manual de arquivos.
+func GenerateDeterministicWallet(id, role, seedPhrase string) *Wallet {
+	seed := sha256.Sum256([]byte(seedPhrase))
+	priv := ed25519.NewKeyFromSeed(seed[:])
+	pub := priv.Public().(ed25519.PublicKey)
+	return &Wallet{
+		ID:         id,
+		Role:       role,
+		PublicKey:  hex.EncodeToString(pub),
+		PrivateKey: hex.EncodeToString(priv),
+	}
+}
+
 // Address retorna a identidade pública global da carteira (chave pública em hex).
 func (w *Wallet) Address() string {
 	if w == nil {

@@ -19,14 +19,25 @@ type ItinerarySegmentDetail struct {
 	AvailableSeats int     `json:"available_seats"` // Vagas restantes neste trecho
 }
 
+// DriverReputationSummary resume a reputação pública on-chain de um motorista na busca.
+type DriverReputationSummary struct {
+	DriverPubKey  string  `json:"driver_pub_key"`
+	AverageRating float64 `json:"average_rating"`
+	TotalRatings  int     `json:"total_ratings"`
+	Complaints    int     `json:"complaints"`
+	NoShows       int     `json:"no_shows"`
+	DriverCancels int     `json:"driver_cancels"`
+}
+
 // ItineraryResult representa uma rota completa (direta ou combinada) encontrada pelo algoritmo de busca.
 type ItineraryResult struct {
-	ItineraryID    string                   `json:"itinerary_id"`    // Identificador do itinerário
-	Segments       []ItinerarySegmentDetail `json:"segments"`        // Trechos que compõem o caminho
-	TotalPrice     float64                  `json:"total_price"`     // Soma do preço de todos os trechos
-	DepartureTime  string                   `json:"departure_time"`  // Horário de partida no primeiro trecho
-	AvailableSeats int                      `json:"available_seats"` // Vagas gargalo (a menor quantidade de vagas entre os trechos)
-	Drivers        []string                 `json:"drivers"`         // Lista de tokens dos motoristas envolvidos
+	ItineraryID       string                             `json:"itinerary_id"`                 // Identificador do itinerário
+	Segments          []ItinerarySegmentDetail           `json:"segments"`                     // Trechos que compõem o caminho
+	TotalPrice        float64                            `json:"total_price"`                  // Soma do preço de todos os trechos
+	DepartureTime     string                             `json:"departure_time"`               // Horário de partida no primeiro trecho
+	AvailableSeats    int                                `json:"available_seats"`              // Vagas gargalo (a menor quantidade de vagas entre os trechos)
+	Drivers           []string                           `json:"drivers"`                      // Lista de tokens/chaves dos motoristas envolvidos
+	DriverReputations map[string]DriverReputationSummary `json:"driver_reputations,omitempty"` // Reputação pública on-chain por motorista
 }
 
 // GraphEdge representa uma aresta no Grafo montado temporariamente para a busca em largura (BFS).
